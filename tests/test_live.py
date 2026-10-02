@@ -1,6 +1,7 @@
 import json
 from concurrent.futures import Future
 from io import BytesIO
+from types import SimpleNamespace
 from zipfile import ZipFile
 
 import numpy as np
@@ -192,6 +193,7 @@ def test_live_frames_keep_drawings_and_view_and_export_actual_displayed_data():
     frame = satellite_fixture()
     desk.live.apply_satellite([frame, satellite_fixture("2026-09-30T12:15:00Z")])
     desk.live.apply_model(model_fixture())
+    desk.live.requested_model = ("2026-09-30T06:00:00Z", 6, ("msl", "gh500"))
     desk.live.player.value = 0
     assert desk.map.x_range.start == original_range[0]
     assert desk.map.x_range.end == original_range[1]
@@ -245,6 +247,198 @@ def test_projection_change_keeps_the_selected_satellite_frame():
     pixels = pixels[pixels != 0]
     assert pixels.size > 0
     assert np.all(pixels == 0xFFFF0000)
+
+
+def test_reference_time_selects_model_run_and_step_from_the_shared_policy(monkeypatch):
+    desk = WeatherDesk()
+    live = desk.live
+    calls = []
+    fields = {field: {"xs": [], "ys": [], "level": []} for field in ("msl", "gh500")}
+
+    def model(run, step, selected):
+        calls.append((run, step, selected))
+        return ModelFrame(run, step, fields["msl"], fields["gh500"], {"msl": b"grib"}, fields)
+
+    monkeypatch.setattr(live.service, "model", model)
+
+    def immediate_submit(channel, work, apply):
+        apply(work())
+
+    monkeypatch.setattr(live, "submit", immediate_submit)
+    live._setting_controls = True
+    live.run.options = ["2026-10-02T12:00:00Z", "2026-10-02T18:00:00Z"]
+    live.run.value = "2026-10-02T12:00:00Z"
+    live.run.disabled = False
+    live._setting_controls = False
+
+    live.set_reference_time("2026-10-02T17:40:00Z")
+
+    assert calls == [("2026-10-02T18:00:00Z", 0, ("msl", "gh500"))]
+    assert live.model.metadata()["valid_time"] == "2026-10-02T18:00:00Z"
+    assert "Référence demandée" in live.time_status.object
+    assert not live.has_unresolved_selection
+
+
+def test_export_is_refused_while_a_new_model_selection_loads(monkeypatch):
+    desk = WeatherDesk()
+    live = desk.live
+    previous = model_fixture()
+    live.apply_model(previous)
+    live.requested_model = (previous.run, previous.step, ("msl", "gh500"))
+    live._setting_controls = True
+    live.run.options = ["2026-09-30T06:00:00Z", "2026-09-30T12:00:00Z"]
+    live.run.value = "2026-09-30T06:00:00Z"
+    live.run.disabled = False
+    live._setting_controls = False
+
+    def hold_request(channel, work, apply):
+        live.pending[channel] = (Future(), apply)
+
+    monkeypatch.setattr(live, "submit", hold_request)
+    live.set_reference_time("2026-09-30T12:00:00Z")
+
+    assert live.model is previous
+    with pytest.raises(ValueError, match="chargement du modèle"):
+        desk.snapshot()
+
+
+def test_reference_time_selects_the_nearest_catalogued_satellite_frame(monkeypatch):
+    desk = WeatherDesk()
+    live = desk.live
+    stamps = [
+        "2026-10-02T12:00:00Z",
+        "2026-10-02T12:20:00Z",
+        "2026-10-02T12:40:00Z",
+    ]
+    live.products["test:ir"] = SimpleNamespace(
+        product_id="test:ir", title="Infrared", times=tuple(stamps)
+    )
+    live.current_product = "test:ir"
+    live.satellites = [
+        SatelliteFrame(stamp, stamp.encode(), np.ones((1, 1), dtype=np.uint32)) for stamp in stamps
+    ]
+    live._arrival_order = list(stamps)
+    live.frame_order.data = {"index": [0, 1, 2]}
+    live.player.end = 2
+    monkeypatch.setattr(live, "load_latest_model", lambda: None)
+
+    live.set_reference_time("2026-10-02T12:30:00Z")
+
+    assert live.requested_satellite_time == "2026-10-02T12:20:00Z"
+    assert live.selected_satellite().valid_time == live.requested_satellite_time
+    assert live.sat_filter.indices == [1]
+
+
+def test_out_of_order_model_responses_cannot_replace_the_latest_time_selection(monkeypatch):
+    import weather_desk.live as module
+
+    futures = []
+
+    class Executor:
+        def submit(self, work):
+            future = Future()
+            futures.append(future)
+            return future
+
+    monkeypatch.setattr(module, "WORKERS", Executor())
+    desk = WeatherDesk()
+    live = desk.live
+    live._setting_controls = True
+    live.run.options = ["2026-10-02T18:00:00Z", "2026-10-02T12:00:00Z"]
+    live.run.value = "2026-10-02T12:00:00Z"
+    live.run.disabled = False
+    live._setting_controls = False
+
+    live.set_reference_time("2026-10-02T17:40:00Z")
+    futures[0].set_running_or_notify_cancel()
+    live.set_reference_time("2026-10-02T20:40:00Z")
+    old_fields = {
+        "msl": {"xs": [], "ys": [], "level": []},
+        "gh500": {"xs": [], "ys": [], "level": []},
+    }
+    futures[0].set_result(
+        ModelFrame(
+            "2026-10-02T18:00:00Z", 0, old_fields["msl"], old_fields["gh500"], {}, old_fields
+        )
+    )
+    live.poll()
+
+    assert live.model is None
+    assert live.pending["model"][0] is futures[1]
+    futures[1].set_result(
+        ModelFrame(
+            "2026-10-02T18:00:00Z", 3, old_fields["msl"], old_fields["gh500"], {}, old_fields
+        )
+    )
+    live.poll()
+
+    assert live.model.metadata()["valid_time"] == "2026-10-02T21:00:00Z"
+    assert live.requested_model == (
+        "2026-10-02T18:00:00Z",
+        3,
+        ("msl", "gh500"),
+    )
+
+
+def test_unavailable_new_time_invalidates_an_older_pending_model_response(monkeypatch):
+    import weather_desk.live as module
+
+    futures = []
+
+    class Executor:
+        def submit(self, work):
+            future = Future()
+            futures.append(future)
+            return future
+
+    monkeypatch.setattr(module, "WORKERS", Executor())
+    desk = WeatherDesk()
+    live = desk.live
+    live._setting_controls = True
+    live.run.options = ["2026-10-02T18:00:00Z", "2026-10-02T12:00:00Z"]
+    live.run.value = "2026-10-02T12:00:00Z"
+    live.run.disabled = False
+    live._setting_controls = False
+    live.set_reference_time("2026-10-02T17:40:00Z")
+    futures[0].set_running_or_notify_cancel()
+
+    live.set_reference_time("2026-10-09T12:00:00Z")
+    fields = {"xs": [], "ys": [], "level": []}
+    futures[0].set_result(ModelFrame("2026-10-02T18:00:00Z", 0, fields, fields, {}))
+    live.poll()
+
+    assert live.model is None
+    assert "model" not in live.pending
+    assert "aucune échéance ifs" in live.model_time_error.lower()
+    assert live.has_unresolved_selection
+
+
+def test_satellite_can_resolve_when_reference_is_outside_ifs_window(monkeypatch):
+    desk = WeatherDesk()
+    live = desk.live
+    stamp = "2026-10-09T12:00:00Z"
+    live.products["test:ir"] = SimpleNamespace(
+        product_id="test:ir", title="Infrared", times=(stamp,)
+    )
+    live.current_product = "test:ir"
+    live.run.options = [
+        "2026-10-02T18:00:00Z",
+        "2026-10-02T12:00:00Z",
+        "2026-10-02T06:00:00Z",
+        "2026-10-02T00:00:00Z",
+    ]
+    live.satellites = [SatelliteFrame(stamp, stamp.encode(), np.ones((1, 1), dtype=np.uint32))]
+    live._arrival_order = [stamp]
+    live.frame_order.data = {"index": [0]}
+    live.player.end = 0
+    monkeypatch.setattr(live, "load_latest_model", lambda: None)
+
+    live.set_reference_time(stamp)
+
+    assert live.requested_satellite_time == stamp
+    assert live.selected_satellite().valid_time == stamp
+    assert "aucune échéance ifs" in live.model_time_error.lower()
+    assert live.has_unresolved_selection
 
 
 def test_new_request_discards_old_result_and_close_cancels(monkeypatch):

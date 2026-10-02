@@ -1,5 +1,7 @@
 import json
+from concurrent.futures import Future
 from io import BytesIO
+from types import SimpleNamespace
 from zipfile import ZipFile
 
 import pytest
@@ -43,7 +45,7 @@ def test_polygon_closed_and_incomplete_gesture_omitted():
     assert feature["properties"]["valid_time"] == "2026-09-30T12:00:00Z"
 
 
-def test_session_state_survives_edit_and_is_not_shared():
+def test_session_state_survives_edit_and_time_changes_gate_exports(monkeypatch):
     desk = WeatherDesk()
     other = WeatherDesk()
     points = [to_mercator(-2, 45), to_mercator(-1, 48)]
@@ -54,10 +56,151 @@ def test_session_state_survives_edit_and_is_not_shared():
     assert len(desk.snapshot()[1]["features"]) == 1
     assert other.snapshot()[1]["features"] == []
     assert desk.analysis_id != other.analysis_id
+
+    def hold_request(channel, work, apply):
+        desk.live.pending[channel] = (Future(), apply)
+
+    monkeypatch.setattr(desk.live, "submit", hold_request)
     desk.fields["valid_time"].value = "2026-10-01T00:00:00Z"
-    assert desk.snapshot()[1]["features"][0]["properties"]["valid_time"] == "2026-10-01T00:00:00Z"
+    assert desk.live.reference_time == "2026-10-01T00:00:00Z"
+    with pytest.raises(ValueError, match="chargement du modèle"):
+        desk.snapshot()
     source.data = {"xs": [], "ys": []}
-    assert desk.snapshot()[1]["features"] == []
+    assert desk.layers["cold_front"]["source"].data == {"xs": [], "ys": []}
+    assert "model" in desk.live.pending
+
+
+def test_editorial_and_annotations_autosave_and_restore_across_sessions(tmp_path):
+    database = tmp_path / "workspace.sqlite3"
+    service = WorkspaceService(SQLiteWorkspaceRepository(database))
+    desk = WeatherDesk(service)
+    points = [to_mercator(-2, 45), to_mercator(-1, 48)]
+    desk.layers["cold_front"]["source"].data = {
+        "xs": [[point[0] for point in points]],
+        "ys": [[point[1] for point in points]],
+    }
+    desk.fields["headline"].value = "Front froid sur le golfe de Gascogne."
+    desk.fields["analysis"].value = "Renforcement du vent de secteur ouest."
+
+    reopened = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+
+    assert reopened.fields["headline"].value == "Front froid sur le golfe de Gascogne."
+    assert reopened.fields["analysis"].value == "Renforcement du vent de secteur ouest."
+    assert len(reopened.snapshot()[1]["features"]) == 1
+    coordinates = reopened.snapshot()[1]["features"][0]["geometry"]["coordinates"]
+    assert coordinates == [[-2.0, 45.0], [-1.0, 48.0]]
+
+
+def test_named_analysis_can_be_duplicated_and_reopened_in_the_ui(tmp_path):
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    desk = WeatherDesk(service)
+    desk.analysis_name.value = "Route des Açores"
+    desk._rename_analysis(None)
+    desk.fields["headline"].value = "Dépression en approche."
+    desk.analysis_name.value = "Route bis"
+    desk._duplicate_analysis(None)
+    duplicate_id = desk.workspace_state.workspace_id
+
+    desk._open_analysis(type("Selection", (), {"new": "main"})())
+
+    assert desk.fields["headline"].value == "Dépression en approche."
+    desk._open_analysis(type("Selection", (), {"new": duplicate_id})())
+    assert desk.analysis_name.value == "Route bis — copie"
+    assert desk.fields["headline"].value == "Dépression en approche."
+
+
+def test_ui_freezes_and_downloads_an_immutable_edition(tmp_path):
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    desk = WeatherDesk(service)
+    desk.fields["headline"].value = "Bulletin initial."
+
+    desk._freeze_edition(None)
+    edition_id = desk.edition_select.value
+    desk.fields["headline"].value = "Brouillon modifié après livraison."
+
+    with ZipFile(desk._download_edition()) as archive:
+        frozen_manifest = json.loads(archive.read("manifest.json"))
+        bulletin = archive.read("bulletin.md").decode()
+    assert frozen_manifest["analysis"]["headline"] == "Bulletin initial."
+    assert "Bulletin initial." in bulletin
+    assert "Brouillon modifié" not in bulletin
+    assert service.read_edition(edition_id).manifest["edition"]["immutable"] is True
+
+
+def test_concurrent_edit_is_detected_without_overwriting_local_text(tmp_path):
+    database = tmp_path / "workspace.sqlite3"
+    first = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+    second = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+    second.fields["headline"].value = "Texte de la seconde session."
+
+    first.fields["headline"].value = "Texte local à conserver."
+    first.sync_workspace()
+
+    assert first.fields["headline"].value == "Texte local à conserver."
+    assert first._has_local_conflict
+    assert first.reload_conflict_button.visible
+    first._reload_workspace_conflict(None)
+    assert first.fields["headline"].value == "Texte de la seconde session."
+    assert not first._has_local_conflict
+
+
+def test_remote_revision_does_not_overwrite_a_pending_camera_change(tmp_path):
+    database = tmp_path / "workspace.sqlite3"
+    service = WorkspaceService(SQLiteWorkspaceRepository(database))
+    first = WeatherDesk(service)
+    second = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+    second.fields["headline"].value = "Révision distante."
+    first.map_x_range.start += 250_000
+    local_start = first.map_x_range.start
+
+    first.sync_workspace()
+
+    assert first.map_x_range.start == local_start
+    assert first._has_local_conflict
+    first._reload_workspace_conflict(None)
+    assert first.fields["headline"].value == "Révision distante."
+
+
+def test_model_field_selection_is_saved_and_restored_with_the_workspace(tmp_path):
+    database = tmp_path / "workspace.sqlite3"
+    service = WorkspaceService(SQLiteWorkspaceRepository(database))
+    desk = WeatherDesk(service)
+
+    desk.live.model_fields.value = ["gh500"]
+    reopened = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+
+    assert reopened.live.model_fields.value == ["gh500"]
+    assert reopened.workspace_state.panels[0].fields == ("gh500",)
+
+
+def test_manual_ifs_run_and_step_are_persisted_and_restored(monkeypatch, tmp_path):
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    desk = WeatherDesk(service)
+    live = desk.live
+    monkeypatch.setattr(live, "load_model", lambda: None)
+    reference_time = service.read().reference_time
+    live._setting_controls = True
+    live.run.options = ["2026-10-02T12:00:00Z", "2026-10-02T06:00:00Z"]
+    live.run.value = "2026-10-02T12:00:00Z"
+    live.run.disabled = False
+    live.step.value = 6
+    live._setting_controls = False
+
+    desk._panel_model_selection_changed(SimpleNamespace(obj=live.step, new=6))
+
+    saved = service.read()
+    assert saved.reference_time == reference_time
+    assert saved.panels[0].model_run == "2026-10-02T12:00:00Z"
+    assert saved.panels[0].step_hours == 6
+
+    reopened = WeatherDesk(
+        WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    )
+    reopened_live = reopened.live
+    monkeypatch.setattr(reopened_live, "load_model", lambda: None)
+    reopened_live._run_loaded("2026-10-02T18:00:00Z")
+    assert reopened_live.run.value == "2026-10-02T12:00:00Z"
+    assert reopened_live.step.value == 6
 
 
 def test_bundle_contains_images_provenance_and_verifiable_checksums():
@@ -151,12 +294,13 @@ def test_shared_workspace_layout_updates_another_browser_session(tmp_path):
     assert remote.map_grid.ncols == 3
 
 
-def test_workspace_commands_update_shared_camera_fields_and_valid_time(tmp_path):
+def test_workspace_commands_update_shared_camera_fields_and_valid_time(monkeypatch, tmp_path):
     from weather_desk.workspace import Camera
 
     service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
     screen = WeatherDesk(service)
     remote = WeatherDesk(service)
+    monkeypatch.setattr(remote.live, "submit", lambda channel, work, apply: None)
     state = service.read()
     service.apply(
         [

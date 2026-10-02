@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 MAX_PANELS = 6
 _SLUG = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
 _LAYOUTS = {"auto", "1", "2-horizontal", "2-vertical", "4", "6"}
@@ -27,6 +28,17 @@ class WorkspaceError(ValueError):
 
 class WorkspaceConflict(RuntimeError):
     """The workspace changed since the caller last read it."""
+
+
+@dataclass(frozen=True)
+class Edition:
+    edition_id: str
+    workspace_id: str
+    revision: int
+    created_at: str
+    manifest: dict[str, Any]
+    annotations: dict[str, Any]
+    artifacts: dict[str, bytes]
 
 
 @dataclass(frozen=True)
@@ -53,6 +65,8 @@ class PanelConfig:
     satellite_product: str | None = "msg_fes:wv062"
     model_id: str | None = "ifs"
     fields: tuple[str, ...] = ("msl", "gh500")
+    model_run: str | None = None
+    step_hours: int | None = None
 
     @classmethod
     def create(cls, **values: Any) -> PanelConfig:
@@ -63,7 +77,7 @@ class PanelConfig:
             raise WorkspaceError("Identifiant de panneau invalide.")
         if not isinstance(self.fields, tuple):
             raise WorkspaceError("Les champs doivent être une liste immuable d'identifiants.")
-        for value in (self.satellite_product, self.model_id, *self.fields):
+        for value in (self.satellite_product, self.model_id, self.model_run, *self.fields):
             if value is not None and (not isinstance(value, str) or not _SLUG.fullmatch(value)):
                 raise WorkspaceError("Identifiant de source ou de champ invalide.")
         if set(self.fields) - _FIELDS:
@@ -72,11 +86,28 @@ class PanelConfig:
             raise WorkspaceError("Un champ ne peut apparaître qu'une fois dans un panneau.")
         if self.satellite_product is None and self.model_id is None:
             raise WorkspaceError("Un panneau doit contenir une source satellite ou modèle.")
+        if self.model_run is not None:
+            try:
+                run = datetime.fromisoformat(self.model_run.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise WorkspaceError("Le run IFS doit être une date ISO-8601.") from exc
+            if run.tzinfo is None or run.hour % 6 or run.minute or run.second:
+                raise WorkspaceError("Le run IFS doit inclure un fuseau et être aligné sur 6 h.")
+        if (self.model_run is None) != (self.step_hours is None):
+            raise WorkspaceError("Le run et l'échéance IFS doivent être enregistrés ensemble.")
+        if self.step_hours is not None and (
+            not isinstance(self.step_hours, int)
+            or isinstance(self.step_hours, bool)
+            or not 0 <= self.step_hours <= 72
+            or self.step_hours % 3
+        ):
+            raise WorkspaceError("L'échéance IFS doit être un pas de 3 h entre 0 et 72 h.")
 
 
 @dataclass(frozen=True)
 class WorkspaceState:
     workspace_id: str = "main"
+    name: str = "Analyse météo"
     revision: int = 0
     layout: str = "1"
     reference_time: str = ""
@@ -85,6 +116,7 @@ class WorkspaceState:
     projection: str = "mercator"
     panels: tuple[PanelConfig, ...] = ()
     annotations: dict[str, Any] | None = None
+    editorial: dict[str, str] | None = None
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -95,6 +127,14 @@ class WorkspaceState:
             reference_time=now,
             panels=(PanelConfig.create(),),
             annotations={"type": "FeatureCollection", "features": []},
+            editorial={
+                "zone": "France / façade Atlantique",
+                "confidence": "moyenne",
+                "headline": "",
+                "analysis": "",
+                "impacts": "",
+                "limitations": "",
+            },
         )
 
     def validate(self) -> None:
@@ -104,6 +144,8 @@ class WorkspaceState:
             )
         if not isinstance(self.workspace_id, str) or not _SLUG.fullmatch(self.workspace_id):
             raise WorkspaceError("Identifiant de workspace invalide.")
+        if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 160:
+            raise WorkspaceError("Le nom de l'analyse doit contenir de 1 à 160 caractères.")
         if (
             not isinstance(self.revision, int)
             or isinstance(self.revision, bool)
@@ -137,6 +179,13 @@ class WorkspaceState:
             or not isinstance(self.annotations.get("features"), list)
         ):
             raise WorkspaceError("Les annotations doivent être une FeatureCollection GeoJSON.")
+        if (
+            self.editorial is None
+            or set(self.editorial)
+            != {"zone", "confidence", "headline", "analysis", "impacts", "limitations"}
+            or not all(isinstance(value, str) for value in self.editorial.values())
+        ):
+            raise WorkspaceError("Le brouillon éditorial du workspace est invalide.")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -151,7 +200,17 @@ class WorkspaceState:
         try:
             data = dict(payload)
             version = data.get("schema_version", 1)
-            if version != SCHEMA_VERSION:
+            if version == 1:
+                data["editorial"] = WorkspaceState.default().editorial
+                data["name"] = "Analyse météo"
+                version = 2
+            if version == 2:
+                data["schema_version"] = SCHEMA_VERSION
+                data["panels"] = [
+                    {**panel, "model_run": None, "step_hours": None}
+                    for panel in data.get("panels", ())
+                ]
+            elif version != SCHEMA_VERSION:
                 raise WorkspaceError(f"Migration requise pour la version {version}.")
             data["camera"] = Camera(**data.get("camera", {}))
             data["panels"] = tuple(
@@ -183,12 +242,44 @@ class SQLiteWorkspaceRepository:
                     updated_at TEXT NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS edition_artifacts (
+                    sha256 TEXT PRIMARY KEY,
+                    content BLOB NOT NULL,
+                    size INTEGER NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS editions (
+                    edition_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    workspace_revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    annotations_json TEXT NOT NULL,
+                    artifacts_json TEXT NOT NULL,
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                )"""
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=10000")
         return connection
+
+    def backup_to(self, destination: Path) -> Path:
+        """Create a consistent SQLite backup, including immutable editions and blobs."""
+        destination = Path(destination)
+        if destination.resolve() == self.path.resolve():
+            raise WorkspaceError("La sauvegarde doit utiliser un autre fichier que la base active.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with (
+            closing(self._connect()) as source,
+            closing(sqlite3.connect(destination, timeout=10)) as target,
+        ):
+            source.backup(target)
+        return destination
 
     def load(self, workspace_id: str = "main") -> WorkspaceState:
         with closing(self._connect()) as connection:
@@ -209,6 +300,124 @@ class SQLiteWorkspaceRepository:
             if state.revision != row["revision"]:
                 raise WorkspaceError("Révision SQLite et document de workspace incohérents.")
             return state
+
+    def list(self) -> list[WorkspaceState]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT state_json, revision FROM workspaces ORDER BY updated_at DESC"
+            ).fetchall()
+        states = [WorkspaceState.from_dict(json.loads(row["state_json"])) for row in rows]
+        for state, row in zip(states, rows, strict=True):
+            if state.revision != row["revision"]:
+                raise WorkspaceError("Révision SQLite et document de workspace incohérents.")
+        return states
+
+    def create(self, state: WorkspaceState) -> WorkspaceState:
+        state.validate()
+        if state.revision != 0:
+            raise WorkspaceError("Une nouvelle analyse doit commencer à la révision zéro.")
+        with closing(self._connect()) as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO workspaces VALUES (?, ?, ?, ?)",
+                    (state.workspace_id, state.revision, _json(state.to_dict()), _now()),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise WorkspaceConflict("Une analyse porte déjà cet identifiant.") from exc
+        return state
+
+    def create_edition(
+        self,
+        *,
+        edition_id: str,
+        workspace_id: str,
+        expected_revision: int,
+        created_at: str,
+        manifest: dict[str, Any],
+        annotations: dict[str, Any],
+        artifacts: dict[str, bytes],
+    ) -> Edition:
+        if not isinstance(annotations, dict) or annotations.get("type") != "FeatureCollection":
+            raise WorkspaceError("Un snapshot doit inclure les annotations GeoJSON.")
+        hashes = {}
+        for name, content in artifacts.items():
+            if not isinstance(name, str) or not isinstance(content, bytes):
+                raise WorkspaceError("Artefact de snapshot invalide.")
+            hashes[name] = hashlib.sha256(content).hexdigest()
+        encoded_manifest = _json(manifest)
+        encoded_annotations = _json(annotations)
+        encoded_hashes = _json(hashes)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT revision FROM workspaces WHERE workspace_id = ?", (workspace_id,)
+            ).fetchone()
+            if row is None or row["revision"] != expected_revision:
+                connection.execute("ROLLBACK")
+                raise WorkspaceConflict("Le brouillon a changé avant la création du snapshot.")
+            for name, content in artifacts.items():
+                digest = hashes[name]
+                connection.execute(
+                    "INSERT OR IGNORE INTO edition_artifacts VALUES (?, ?, ?)",
+                    (digest, content, len(content)),
+                )
+            connection.execute(
+                "INSERT INTO editions VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    edition_id,
+                    workspace_id,
+                    expected_revision,
+                    created_at,
+                    encoded_manifest,
+                    encoded_annotations,
+                    encoded_hashes,
+                ),
+            )
+            connection.execute("COMMIT")
+        return Edition(
+            edition_id,
+            workspace_id,
+            expected_revision,
+            created_at,
+            manifest,
+            annotations,
+            artifacts,
+        )
+
+    def list_editions(self, workspace_id: str) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT edition_id, workspace_id, workspace_revision, created_at "
+                "FROM editions WHERE workspace_id = ? ORDER BY created_at DESC",
+                (workspace_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_edition(self, edition_id: str) -> Edition:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM editions WHERE edition_id = ?", (edition_id,)
+            ).fetchone()
+            if row is None:
+                raise WorkspaceError("Snapshot d'édition introuvable.")
+            hashes = json.loads(row["artifacts_json"])
+            artifacts = {}
+            for name, digest in hashes.items():
+                artifact = connection.execute(
+                    "SELECT content FROM edition_artifacts WHERE sha256 = ?", (digest,)
+                ).fetchone()
+                if artifact is None or hashlib.sha256(artifact["content"]).hexdigest() != digest:
+                    raise WorkspaceError(f"Artefact archivé manquant ou corrompu : {name}.")
+                artifacts[name] = bytes(artifact["content"])
+        return Edition(
+            row["edition_id"],
+            row["workspace_id"],
+            row["workspace_revision"],
+            row["created_at"],
+            json.loads(row["manifest_json"]),
+            json.loads(row["annotations_json"]),
+            artifacts,
+        )
 
     def save(self, state: WorkspaceState, expected_revision: int) -> WorkspaceState:
         state.validate()
@@ -255,6 +464,28 @@ class WorkspaceService:
 
     def read(self, workspace_id: str = "main") -> WorkspaceState:
         return self.repository.load(workspace_id)
+
+    def list(self) -> list[WorkspaceState]:
+        return self.repository.list()
+
+    def duplicate(self, workspace_id: str, name: str) -> WorkspaceState:
+        original = self.read(workspace_id)
+        duplicate = replace(
+            original,
+            workspace_id=str(uuid4()),
+            name=name.strip(),
+            revision=0,
+        )
+        return self.repository.create(duplicate)
+
+    def create_edition(self, **values: Any) -> Edition:
+        return self.repository.create_edition(**values)
+
+    def list_editions(self, workspace_id: str) -> list[dict[str, Any]]:
+        return self.repository.list_editions(workspace_id)
+
+    def read_edition(self, edition_id: str) -> Edition:
+        return self.repository.load_edition(edition_id)
 
     def preview(
         self,
@@ -311,6 +542,8 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
         "set_camera_sync": {"op", "enabled"},
         "set_projection": {"op", "projection"},
         "set_annotations": {"op", "value"},
+        "set_editorial": {"op", "value"},
+        "rename": {"op", "name"},
     }
     if op not in command_keys or set(command) - command_keys[op]:
         raise WorkspaceError(f"Arguments de commande invalides : {op}.")
@@ -339,6 +572,8 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
             "satellite_product",
             "model_id",
             "fields",
+            "model_run",
+            "step_hours",
         }:
             raise WorkspaceError("Configuration de panneau invalide.")
         changes = dict(changes)
@@ -371,7 +606,11 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
             panels.append(replace(panels[-1], panel_id=str(uuid4())))
         result = replace(state, layout=layout, panels=tuple(panels))
     elif op == "set_reference_time":
-        result = replace(state, reference_time=command.get("value"))
+        result = replace(
+            state,
+            reference_time=command.get("value"),
+            panels=tuple(replace(panel, model_run=None, step_hours=None) for panel in panels),
+        )
     elif op == "set_camera":
         camera = command.get("camera")
         if not isinstance(camera, dict) or set(camera) != {"longitude", "latitude", "zoom"}:
@@ -383,6 +622,10 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
         result = replace(state, projection=command.get("projection"))
     elif op == "set_annotations":
         result = replace(state, annotations=command.get("value"))
+    elif op == "set_editorial":
+        result = replace(state, editorial=command.get("value"))
+    elif op == "rename":
+        result = replace(state, name=command.get("name"))
     else:
         raise WorkspaceError(f"Commande inconnue : {op}.")
     result.validate()

@@ -35,7 +35,8 @@ from weather_desk.cartography import (
     transformer,
 )
 from weather_desk.live import LiveLayers
-from weather_desk.png_export import prepare_png_document, render_png
+from weather_desk.png_export import format_png_validity, prepare_png_document, render_png
+from weather_desk.temporal import resolve_ifs_time
 from weather_desk.workspace import WorkspaceConflict, WorkspaceService
 
 
@@ -169,11 +170,15 @@ class WeatherDesk:
         self.workspace_service = workspace_service
         self.workspace_state = workspace_service.read() if workspace_service else None
         self._syncing_workspace = False
+        self._has_local_conflict = False
         self.workspace_poller = None
         self.analysis_id = str(uuid4())
         self.created = utc_now()
+        editorial = (self.workspace_state.editorial or {}) if self.workspace_state else {}
         self.fields = {
-            "zone": pn.widgets.TextInput(label="Zone", value="France / façade Atlantique"),
+            "zone": pn.widgets.TextInput(
+                label="Zone", value=editorial.get("zone", "France / façade Atlantique")
+            ),
             "valid_time": pn.widgets.TextInput(
                 label="Échéance de l'analyse (UTC)",
                 value=(
@@ -181,12 +186,22 @@ class WeatherDesk:
                 ),
             ),
             "confidence": pn.widgets.Select(
-                label="Confiance", options=["faible", "moyenne", "forte"], value="moyenne"
+                label="Confiance",
+                options=["faible", "moyenne", "forte"],
+                value=editorial.get("confidence", "moyenne"),
             ),
-            "headline": pn.widgets.TextInput(label="Message principal"),
-            "analysis": pn.widgets.TextAreaInput(label="Analyse", height=160),
-            "impacts": pn.widgets.TextAreaInput(label="Impacts et décisions", height=120),
-            "limitations": pn.widgets.TextAreaInput(label="Limites et incertitudes", height=100),
+            "headline": pn.widgets.TextInput(
+                label="Message principal", value=editorial.get("headline", "")
+            ),
+            "analysis": pn.widgets.TextAreaInput(
+                label="Analyse", value=editorial.get("analysis", ""), height=160
+            ),
+            "impacts": pn.widgets.TextAreaInput(
+                label="Impacts et décisions", value=editorial.get("impacts", ""), height=120
+            ),
+            "limitations": pn.widgets.TextAreaInput(
+                label="Limites et incertitudes", value=editorial.get("limitations", ""), height=100
+            ),
         }
         self.sources = [
             SourceCard("satellite", "Satellite — vapeur d'eau / IR", self.refresh),
@@ -204,18 +219,18 @@ class WeatherDesk:
         self.maps = [self._make_map(index + 1) for index in range(6)]
         self.map = self.maps[0]
         self.live = LiveLayers(self.maps, self.refresh, projection=self.projection)
+        self.live.reference_time = self.fields["valid_time"].value
+        self.live.model_fields.param.watch(self._panel_fields_changed, "value")
+        self.live.sat_product.param.watch(self._panel_product_changed, "value")
+        self.live.run.param.watch(self._panel_model_selection_changed, "value")
+        self.live.step.param.watch(self._panel_model_selection_changed, "value_throttled")
+        if self.workspace_state:
+            self._restore_annotations(self.workspace_state.annotations)
+        self.fields["valid_time"].param.watch(self._reference_time_changed, "value")
         for plot, renderer in zip(self.maps, self.land_fill_renderers, strict=True):
             plot.renderers.remove(renderer)
             plot.renderers.insert(1, renderer)
         self.live.projection_control.param.watch(self._projection_changed, "value")
-        if self.workspace_state:
-            first_panel = self.workspace_state.panels[0]
-            self.live.current_product = first_panel.satellite_product or self.live.current_product
-            self.live.model_fields.value = [
-                field
-                for field in first_panel.fields
-                if field in self.live.model_fields.options.values()
-            ]
         self._camera_dirty = False
         for prop in ("start", "end"):
             self.map_x_range.on_change(prop, self._camera_changed)
@@ -242,6 +257,39 @@ class WeatherDesk:
         self._apply_layout(self.layout.value, initial_count)
         self.layout.param.watch(self._layout_changed, "value")
         self.status = pn.pane.Alert("", alert_type="info")
+        self.reload_conflict_button = pn.widgets.Button(
+            label="Recharger la version enregistrée", color="warning", visible=False
+        )
+        self.reload_conflict_button.on_click(self._reload_workspace_conflict)
+        self.analysis_name = pn.widgets.TextInput(
+            label="Nom de l'analyse",
+            value=self.workspace_state.name if self.workspace_state else "Analyse météo",
+        )
+        self.rename_analysis_button = pn.widgets.Button(label="Renommer", width=110)
+        self.duplicate_analysis_button = pn.widgets.Button(label="Dupliquer", width=110)
+        self.analysis_select = pn.widgets.Select(
+            label="Ouvrir une analyse", options={}, value=None, disabled=True
+        )
+        self.freeze_edition_button = pn.widgets.Button(
+            label="Figer une édition", color="primary", disabled=workspace_service is None
+        )
+        self.edition_select = pn.widgets.Select(
+            label="Éditions immuables", options={}, value=None, disabled=True
+        )
+        self.edition_download = pn.widgets.FileDownload(
+            label="Télécharger l'édition figée (.zip)",
+            filename="weather-desk-edition.zip",
+            callback=self._download_edition,
+            disabled=True,
+        )
+        if self.workspace_service:
+            self._refresh_analysis_options()
+            self._refresh_editions()
+            self.analysis_select.param.watch(self._open_analysis, "value")
+            self.rename_analysis_button.on_click(self._rename_analysis)
+            self.duplicate_analysis_button.on_click(self._duplicate_analysis)
+            self.freeze_edition_button.on_click(self._freeze_edition)
+            self.edition_select.param.watch(self._edition_selected, "value")
         self.preview = pn.pane.Str("", styles={"white-space": "pre-wrap"})
         self.downloads = [
             pn.widgets.FileDownload(
@@ -291,63 +339,75 @@ class WeatherDesk:
         self.prompt_apply = pn.widgets.Button(
             label="Confirmer et appliquer", color="success", disabled=True, width=190
         )
-        self.prompt_result = pn.pane.Markdown("")
+        self.prompt_result = pn.pane.Markdown("", styles={"color": "#f5f7fa"})
         self.prompt_details = pn.Accordion(
             ("Résultat de l’assistant", self.prompt_result),
             active=[],
             sizing_mode="stretch_width",
             visible=False,
+            styles={"color": "#f5f7fa"},
         )
         self.prompt_bar = pn.Column(
+            pn.pane.Markdown("### Assistant météo", styles={"color": "#f5f7fa"}),
+            self.prompt,
             pn.Row(
-                pn.pane.Markdown("**Piloter Weather Desk**", width=180, margin=(0, 8, 0, 0)),
-                self.prompt,
                 self.prompt_button,
                 self.prompt_apply,
                 sizing_mode="stretch_width",
-                styles={"align-items": "center", "gap": "10px"},
+                styles={"justify-content": "flex-start"},
             ),
             self.prompt_details,
             sizing_mode="stretch_width",
-            styles={
-                "position": "fixed",
-                "bottom": "0",
-                "left": "0",
-                "width": "100vw",
-                "z-index": "100",
-                "background": "#ffffff",
-                "border-top": "1px solid #d5e0e6",
-                "padding": "12px 16px",
-                "box-shadow": "0 -4px 16px rgba(18, 48, 68, 0.12)",
-            },
+            styles={"align-items": "stretch"},
         )
         self.pending_proposal = None
         self.prompt_button.on_click(self._prompt_proposal)
         self.prompt_apply.on_click(self._apply_prompt_proposal)
-        for field in self.fields.values():
+        for key, field in self.fields.items():
             field.sizing_mode = "stretch_width"
-            field.param.watch(lambda event: self.refresh(), "value")
+            if key != "valid_time":
+                field.param.watch(lambda event: self._editor_changed(), "value")
         self.view = pn.template.FastListTemplate(
             title="Weather Desk",
-            accent_base_color="#176b87",
-            header_background="#123044",
-            header=[self.prompt_bar],
+            theme=pn.theme.DarkTheme,
+            accent_base_color="#19a7b8",
+            header_background="#050607",
+            collapsed_sidebar=False,
+            sidebar_width=340,
             sidebar=[
-                pn.pane.Markdown("## Poste multi-panneaux"),
-                self.layout,
-                self.live.controls,
-                pn.pane.Markdown("## Contexte de l'analyse"),
-                *[self.fields[k] for k in ("zone", "valid_time", "confidence")],
-                pn.pane.Markdown("## Export"),
-                *self.downloads,
-                self.png_target,
-                self.png_format,
-                self.png_preview_button,
-                self.png_download,
-                pn.pane.Markdown(
-                    "L'analyse reste en mémoire pendant cette session. "
-                    "**Exporter avant de fermer ou recharger la page.**"
+                self.prompt_bar,
+                pn.Accordion(
+                    ("Panneaux et couches", pn.Column(self.layout, self.live.controls)),
+                    (
+                        "Analyse",
+                        pn.Column(
+                            self.analysis_name,
+                            pn.Row(self.rename_analysis_button, self.duplicate_analysis_button),
+                            self.analysis_select,
+                            self.reload_conflict_button,
+                            self.freeze_edition_button,
+                            self.edition_select,
+                            self.edition_download,
+                        ),
+                    ),
+                    (
+                        "Contexte",
+                        pn.Column(*[self.fields[k] for k in ("zone", "valid_time", "confidence")]),
+                    ),
+                    (
+                        "Export",
+                        pn.Column(
+                            *self.downloads,
+                            self.png_target,
+                            self.png_format,
+                            self.png_preview_button,
+                            self.png_download,
+                        ),
+                    ),
+                    active=[0],
+                    sizing_mode="stretch_width",
                 ),
+                pn.pane.Markdown("Les textes et annotations sont sauvegardés automatiquement."),
             ],
             main=[
                 self.live.time_status,
@@ -390,6 +450,7 @@ class WeatherDesk:
                     pn.Accordion(("Aperçu du Markdown exporté", self.preview)),
                     title="Bulletin",
                     collapsible=False,
+                    height=640,
                     sizing_mode="stretch_width",
                 ),
                 pn.Card(
@@ -399,10 +460,27 @@ class WeatherDesk:
                     collapsed=True,
                     sizing_mode="stretch_width",
                 ),
-                pn.Spacer(height=100),
             ],
             main_max_width="1600px",
         )
+        if self.workspace_state:
+            first_panel = self.workspace_state.panels[0]
+            self.live.current_product = first_panel.satellite_product or self.live.current_product
+            preferred = (
+                (first_panel.model_run, first_panel.step_hours)
+                if first_panel.model_run is not None
+                else None
+            )
+            self.live.set_preferred_model_selection(preferred)
+            self._syncing_workspace = True
+            try:
+                self.live.model_fields.value = [
+                    field
+                    for field in first_panel.fields
+                    if field in self.live.model_fields.options.values()
+                ]
+            finally:
+                self._syncing_workspace = False
         self.refresh()
 
     def _make_map(self, index: int):
@@ -418,7 +496,7 @@ class WeatherDesk:
             active_scroll="wheel_zoom",
             toolbar_location="above",
         )
-        plot.background_fill_color = "#e7f0f3"
+        plot.background_fill_color = "#05070a"
         plot.xgrid.visible = False
         plot.ygrid.visible = False
         self.tiles = getattr(self, "tiles", [])
@@ -429,7 +507,8 @@ class WeatherDesk:
                 attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
             )
         )
-        tile.visible = self.projection == "mercator"
+        # Keep the black marine canvas independent of an external tile API key.
+        tile.visible = False
         self.tiles.append(tile)
         land_source = ColumnDataSource(dict(xs=[], ys=[]), name=f"land_outline_{index}")
         land_xs, land_ys = land_lines(self.projection)
@@ -441,8 +520,8 @@ class WeatherDesk:
             xs="xs",
             ys="ys",
             source=land_fill_source,
-            fill_color="#dce6dc",
-            fill_alpha=0.92,
+            fill_color="#161b21",
+            fill_alpha=0.7,
             line_alpha=0,
         )
         self.land_fill_renderers.append(land_fill)
@@ -451,23 +530,23 @@ class WeatherDesk:
             xs="xs",
             ys="ys",
             source=land_source,
-            line_color="#546b74",
-            line_width=1,
-            line_alpha=0.9,
+            line_color="#74818d",
+            line_width=1.1,
+            line_alpha=0.88,
         )
         self.land_sources.append(land_source)
         for kind, label, color, geometry in [
-            ("cold_front", "Front froid", "#1671d9", "LineString"),
-            ("warm_front", "Front chaud", "#d73027", "LineString"),
-            ("occlusion", "Occlusion", "#8e44ad", "LineString"),
-            ("area", "Zone d'intérêt", "#c56a00", "Polygon"),
+            ("cold_front", "Front froid", "#48a5ff", "LineString"),
+            ("warm_front", "Front chaud", "#ff5b64", "LineString"),
+            ("occlusion", "Occlusion", "#c28aff", "LineString"),
+            ("area", "Zone d'intérêt", "#ffbd4a", "Polygon"),
         ]:
             if kind in self.layers:
                 source = self.layers[kind]["source"]
             else:
                 source = ColumnDataSource(data={"xs": [], "ys": []}, name=kind)
                 self.layers[kind] = {"source": source, "geometry": geometry}
-                source.on_change("data", lambda attr, old, new: self.refresh())
+                source.on_change("data", lambda attr, old, new: self._editor_changed())
             kwargs = dict(xs="xs", ys="ys", source=source, line_color=color, line_width=3)
             if geometry == "Polygon":
                 renderer = plot.patches(**kwargs, fill_color=color, fill_alpha=0.15)
@@ -514,7 +593,7 @@ class WeatherDesk:
         for source in self.land_fill_sources:
             source.data = dict(xs=fill_xs, ys=fill_ys)
         for tile in self.tiles:
-            tile.visible = projection == "mercator"
+            tile.visible = False
         if persist and self.workspace_service is not None:
             self._camera_dirty = True
         self._apply_camera_values(camera)
@@ -551,13 +630,145 @@ class WeatherDesk:
                 workspace_id=self.workspace_state.workspace_id,
             )
             self._apply_layout(layout, len(self.workspace_state.panels))
-        except WorkspaceConflict:
-            self.sync_workspace()
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
+
+    def _refresh_analysis_options(self):
+        states = self.workspace_service.list()
+        options = {
+            f"{state.name} · {state.workspace_id[:8]}": state.workspace_id for state in states
+        }
+        self._syncing_workspace = True
+        try:
+            self.analysis_select.options = options
+            self.analysis_select.value = self.workspace_state.workspace_id
+            self.analysis_select.disabled = False
+        finally:
+            self._syncing_workspace = False
+
+    def _refresh_editions(self):
+        records = self.workspace_service.list_editions(self.workspace_state.workspace_id)
+        options = {
+            f"{record['created_at']} · révision {record['workspace_revision']}": record[
+                "edition_id"
+            ]
+            for record in records
+        }
+        self.edition_select.options = options
+        self.edition_select.value = next(iter(options.values()), None)
+        self.edition_select.disabled = not options
+        self.edition_download.disabled = not options
+
+    def _edition_selected(self, event):
+        self.edition_download.disabled = not bool(event.new)
+
+    def _freeze_edition(self, event):
+        try:
+            manifest, annotations = self.snapshot()
+            edition_id = str(uuid4())
+            created_at = utc_now()
+            manifest["edition"] = {
+                "edition_id": edition_id,
+                "created_at_utc": created_at,
+                "workspace_id": self.workspace_state.workspace_id,
+                "workspace_revision": self.workspace_state.revision,
+                "immutable": True,
+            }
+            artifacts = {
+                f"images/{source.key}.png": source.normalized
+                for source in self.sources
+                if source.normalized
+            }
+            artifacts.update(self.live.artifacts())
+            self.workspace_service.create_edition(
+                edition_id=edition_id,
+                workspace_id=self.workspace_state.workspace_id,
+                expected_revision=self.workspace_state.revision,
+                created_at=created_at,
+                manifest=manifest,
+                annotations=annotations,
+                artifacts=artifacts,
+            )
+            self._refresh_editions()
+            self.status.object = f"Édition figée et archivée : `{edition_id}`."
+            self.status.alert_type = "success"
+        except (ValueError, WorkspaceConflict) as exc:
+            self.status.object = f"Édition non figée : {exc}"
+            self.status.alert_type = "danger"
+
+    def _download_edition(self):
+        edition_id = self.edition_select.value
+        if not edition_id:
+            raise ValueError("Sélectionner une édition archivée.")
+        edition = self.workspace_service.read_edition(edition_id)
+        images = {
+            name[len("images/") : -len(".png")]: content
+            for name, content in edition.artifacts.items()
+            if name.startswith("images/") and name.endswith(".png")
+        }
+        live = {
+            name: content for name, content in edition.artifacts.items() if name.startswith("live/")
+        }
+        return export_bundle(edition.manifest, edition.annotations, images, live)
+
+    def _open_analysis(self, event):
+        if self._syncing_workspace or not event.new:
+            return
+        self.workspace_state = self.workspace_service.read(event.new)
+        self._has_local_conflict = False
+        self.reload_conflict_button.visible = False
+        self.analysis_name.value = self.workspace_state.name
+        self._apply_workspace_state(self.workspace_state)
+        self._refresh_analysis_options()
+        self._refresh_editions()
+
+    def _rename_analysis(self, event):
+        name = self.analysis_name.value.strip()
+        try:
+            self.workspace_state = self.workspace_service.apply(
+                [{"op": "rename", "name": name}],
+                expected_revision=self.workspace_state.revision,
+                workspace_id=self.workspace_state.workspace_id,
+            )
+            self.status.object = f"Analyse « {name} » enregistrée."
+            self.status.alert_type = "success"
+            self._refresh_analysis_options()
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
+        except ValueError as exc:
+            self.status.object = f"Nom non enregistré : {exc}"
+            self.status.alert_type = "danger"
+
+    def _duplicate_analysis(self, event):
+        name = self.analysis_name.value.strip()
+        try:
+            self.workspace_state = self.workspace_service.duplicate(
+                self.workspace_state.workspace_id, f"{name} — copie"
+            )
+            self.analysis_name.value = self.workspace_state.name
+            self._apply_workspace_state(self.workspace_state)
+            self.status.object = f"Analyse dupliquée sous « {self.workspace_state.name} »."
+            self.status.alert_type = "success"
+            self._refresh_analysis_options()
+            self._refresh_editions()
+        except (WorkspaceConflict, ValueError) as exc:
+            if isinstance(exc, WorkspaceConflict):
+                self._mark_workspace_conflict(exc)
+            else:
+                self.status.object = f"Duplication impossible : {exc}"
+                self.status.alert_type = "danger"
 
     def sync_workspace(self):
         if self.workspace_service is None:
             return
         incoming = self.workspace_service.read(self.workspace_state.workspace_id)
+        if self._has_local_conflict:
+            return
+        if self._camera_dirty and incoming.revision != self.workspace_state.revision:
+            self._mark_workspace_conflict(
+                "une autre session a modifié le workspace avant la sauvegarde de la caméra"
+            )
+            return
         if incoming.revision == self.workspace_state.revision:
             if self._camera_dirty:
                 try:
@@ -570,42 +781,208 @@ class WeatherDesk:
                         expected_revision=self.workspace_state.revision,
                         workspace_id=self.workspace_state.workspace_id,
                     )
-                except WorkspaceConflict:
-                    self.workspace_state = self.workspace_service.read(
-                        self.workspace_state.workspace_id
-                    )
-                    self._apply_workspace_state(self.workspace_state)
-                finally:
+                except WorkspaceConflict as exc:
+                    self._mark_workspace_conflict(exc)
+                else:
                     self._camera_dirty = False
             return
         self.workspace_state = incoming
+        self.analysis_name.value = incoming.name
         self._apply_workspace_state(incoming)
+        self._refresh_analysis_options()
+        self._refresh_editions()
 
     def _apply_workspace_state(self, incoming):
         projection_changed = incoming.projection != self.projection
+        time_changed = incoming.reference_time != self.live.reference_time
         self._syncing_workspace = True
         try:
+            self.analysis_name.value = incoming.name
             self.layout.value = incoming.layout
             self.fields["valid_time"].value = incoming.reference_time
+            for key, value in (incoming.editorial or {}).items():
+                if key in self.fields:
+                    self.fields[key].value = value
             self.live.projection_control.value = incoming.projection
         finally:
             self._syncing_workspace = False
         if projection_changed:
             self._set_projection(incoming.projection)
+        if time_changed:
+            self.live.set_reference_time(incoming.reference_time)
+        self._restore_annotations(incoming.annotations)
         self._apply_layout(incoming.layout, len(incoming.panels))
         if incoming.panels:
             panel = incoming.panels[0]
-            if panel.satellite_product:
-                self.live.current_product = panel.satellite_product
-            if (
-                panel.satellite_product
-                and panel.satellite_product in self.live.sat_product.options.values()
-            ):
-                self.live.sat_product.value = panel.satellite_product
-            self.live.model_fields.value = [
-                field for field in panel.fields if field in self.live.model_fields.options.values()
-            ]
+            self._syncing_workspace = True
+            try:
+                if panel.satellite_product:
+                    self.live.current_product = panel.satellite_product
+                preferred = (
+                    (panel.model_run, panel.step_hours) if panel.model_run is not None else None
+                )
+                self.live.set_preferred_model_selection(preferred)
+                if (
+                    panel.satellite_product
+                    and panel.satellite_product in self.live.sat_product.options.values()
+                ):
+                    self.live.sat_product.value = panel.satellite_product
+                self.live.model_fields.value = [
+                    field
+                    for field in panel.fields
+                    if field in self.live.model_fields.options.values()
+                ]
+            finally:
+                self._syncing_workspace = False
         self._apply_camera(incoming.camera)
+
+    def _editor_changed(self):
+        if self._syncing_workspace:
+            return
+        self.refresh()
+        if self.workspace_service is None or not hasattr(self, "layers"):
+            return
+        try:
+            state = self.workspace_service.apply(
+                [
+                    {
+                        "op": "set_editorial",
+                        "value": {
+                            key: self.fields[key].value
+                            for key in (
+                                "zone",
+                                "confidence",
+                                "headline",
+                                "analysis",
+                                "impacts",
+                                "limitations",
+                            )
+                        },
+                    },
+                    {"op": "set_annotations", "value": self._annotations_geojson()},
+                ],
+                expected_revision=self.workspace_state.revision,
+                workspace_id=self.workspace_state.workspace_id,
+            )
+            self.workspace_state = state
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
+
+    def _panel_fields_changed(self, event):
+        if self._syncing_workspace or self.workspace_service is None:
+            return
+        self._save_panel_changes({"fields": list(event.new)})
+
+    def _panel_product_changed(self, event):
+        if self._syncing_workspace or self.workspace_service is None or not event.new:
+            return
+        self._save_panel_changes({"satellite_product": event.new})
+
+    def _panel_model_selection_changed(self, event):
+        if self._syncing_workspace or self.live._setting_controls or not self.live.run.value:
+            return
+        step = event.new if event.obj is self.live.step else self.live.step.value
+        selection = (self.live.run.value, step)
+        self.live.preferred_model_selection = selection
+        self._save_panel_changes({"model_run": selection[0], "step_hours": selection[1]})
+
+    def _save_panel_changes(self, changes):
+        try:
+            panel = self.workspace_state.panels[0]
+            self.workspace_state = self.workspace_service.apply(
+                [{"op": "configure_panel", "panel_id": panel.panel_id, "changes": changes}],
+                expected_revision=self.workspace_state.revision,
+                workspace_id=self.workspace_state.workspace_id,
+            )
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
+
+    def _annotations_geojson(self):
+        convert = transformer(self.projection, inverse=True)
+        drawing_layers = {}
+        for key, layer in self.layers.items():
+            data = layer["source"].data
+            xs, ys = [], []
+            for line_x, line_y in zip(data["xs"], data["ys"], strict=True):
+                x, y = convert(line_x, line_y)
+                xs.append(list(x))
+                ys.append(list(y))
+            drawing_layers[key] = {
+                "data": {**data, "xs": xs, "ys": ys},
+                "geometry": layer["geometry"],
+            }
+        return drawings_geojson(drawing_layers, self.fields["valid_time"].value)
+
+    def _restore_annotations(self, collection):
+        if not isinstance(collection, dict):
+            return
+        grouped = {key: {"xs": [], "ys": []} for key in self.layers}
+        convert = transformer(self.projection)
+        for feature in collection.get("features", []):
+            kind = feature.get("properties", {}).get("kind")
+            geometry = feature.get("geometry", {})
+            if kind not in grouped or geometry.get("type") != self.layers[kind]["geometry"]:
+                continue
+            coordinates = geometry.get("coordinates", [])
+            if geometry["type"] == "Polygon":
+                coordinates = coordinates[0] if coordinates else []
+            if len(coordinates) < (3 if geometry["type"] == "Polygon" else 2):
+                continue
+            mercator = [to_mercator(point[0], point[1]) for point in coordinates]
+            x, y = convert([point[0] for point in mercator], [point[1] for point in mercator])
+            grouped[kind]["xs"].append(list(x))
+            grouped[kind]["ys"].append(list(y))
+        self._syncing_workspace = True
+        try:
+            for kind, data in grouped.items():
+                self.layers[kind]["source"].data = data
+        finally:
+            self._syncing_workspace = False
+
+    def _mark_workspace_conflict(self, error):
+        self._has_local_conflict = True
+        self.reload_conflict_button.visible = True
+        self.status.object = (
+            f"Conflit de sauvegarde : {error} Vos modifications locales sont conservées "
+            "jusqu'au rechargement explicite."
+        )
+        self.status.alert_type = "danger"
+
+    def _reload_workspace_conflict(self, event):
+        self.workspace_state = self.workspace_service.read(self.workspace_state.workspace_id)
+        self._has_local_conflict = False
+        self.reload_conflict_button.visible = False
+        self._apply_workspace_state(self.workspace_state)
+        self._refresh_analysis_options()
+        self._refresh_editions()
+        self.status.object = (
+            f"Version enregistrée rechargée (révision {self.workspace_state.revision})."
+        )
+        self.status.alert_type = "info"
+
+    def _reference_time_changed(self, event):
+        if self._syncing_workspace:
+            return
+        try:
+            resolved = resolve_ifs_time(event.new)
+            self._syncing_workspace = True
+            try:
+                self.fields["valid_time"].value = resolved.requested_time
+            finally:
+                self._syncing_workspace = False
+            if self.workspace_service is not None:
+                self.workspace_state = self.workspace_service.apply(
+                    [{"op": "set_reference_time", "value": resolved.requested_time}],
+                    expected_revision=self.workspace_state.revision,
+                    workspace_id=self.workspace_state.workspace_id,
+                )
+            self.live.set_reference_time(resolved.requested_time)
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
+        except ValueError as exc:
+            self.live.time_status.object = f"**Heure de référence invalide : {exc}**"
+            self.status.object = str(exc)
+            self.status.alert_type = "danger"
 
     def _camera_changed(self, attr, old, new):
         if not self._syncing_workspace:
@@ -679,6 +1056,10 @@ class WeatherDesk:
         errors = [source.error for source in self.sources if source.error]
         if errors:
             raise ValueError("Corriger les images invalides avant l'export.")
+        if self.live.has_unresolved_selection:
+            raise ValueError(
+                "Export suspendu : attendre le chargement du modèle correspondant à la sélection."
+            )
         fields = {key: widget.value for key, widget in self.fields.items()}
         convert = transformer(self.projection, inverse=True)
         drawing_layers = {}
@@ -768,11 +1149,7 @@ class WeatherDesk:
         title = "Weather Desk — " + (self.fields["zone"].value or "Analyse météo")
         metadata = self.live.metadata()
         legend_parts = []
-        attributions = (
-            ["© OpenStreetMap contributors"]
-            if self.projection == "mercator"
-            else ["Natural Earth 1:110m (domaine public)"]
-        )
+        attributions = ["Natural Earth 1:110m (domaine public)"]
         for source in metadata:
             if source.get("visible") is False:
                 continue
@@ -786,12 +1163,13 @@ class WeatherDesk:
         legend = "; ".join(legend_parts) or "Fond cartographique"
         credits = " · ".join(dict.fromkeys(attributions))
         try:
+            manifest, _ = self.snapshot()
             html_document = prepare_png_document(target, format=self.png_format.value)
             output = await asyncio.to_thread(
                 render_png,
                 html_document,
                 title=title,
-                valid_time=self.fields["valid_time"].value,
+                valid_time=format_png_validity(manifest),
                 legend=legend,
                 credits=credits,
                 format=self.png_format.value,

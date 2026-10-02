@@ -10,20 +10,58 @@ from weather_desk.mcp_server import (
     BearerTokenMiddleware,
     apply_workspace_commands,
     preview_workspace_commands,
+    resolve_reference_time,
 )
 from weather_desk.ui import WeatherDesk
 from weather_desk.workspace import SQLiteWorkspaceRepository, WorkspaceService
 
 
-def test_prompt_uses_a_full_width_fixed_single_line_dock():
+def test_prompt_leads_a_collapsible_grouped_sidebar():
     desk = WeatherDesk()
 
     assert isinstance(desk.prompt, pn.widgets.TextInput)
-    assert desk.view.header[0] is desk.prompt_bar
-    assert desk.view.main[-1].height == 100
-    assert all(widget is not desk.prompt for widget in desk.view.sidebar)
-    assert desk.prompt_bar.styles["position"] == "fixed"
-    assert desk.prompt_bar.styles["width"] == "100vw"
+    assert desk.view.sidebar[0] is desk.prompt_bar
+    assert desk.view.collapsed_sidebar is False
+    assert desk.view.sidebar_width == 340
+    assert isinstance(desk.view.sidebar[1], pn.Accordion)
+    assert desk.prompt_result.styles["color"] == "#f5f7fa"
+    assert desk.prompt_details.styles["color"] == "#f5f7fa"
+
+
+def test_bulletin_editor_uses_a_map_panel_height():
+    desk = WeatherDesk()
+    bulletin = next(
+        card for card in desk.view.main if isinstance(card, pn.Card) and card.title == "Bulletin"
+    )
+
+    assert bulletin.height == desk.maps[0].height == 640
+
+
+def test_ui_reference_time_persists_through_the_shared_workspace_service(monkeypatch, tmp_path):
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    desk = WeatherDesk(service)
+    channels = []
+    monkeypatch.setattr(
+        desk.live,
+        "submit",
+        lambda channel, work, apply: channels.append(channel),
+    )
+
+    desk.fields["valid_time"].value = "2026-10-02T17:40:00+00:00"
+
+    assert desk.live.reference_time == "2026-10-02T17:40:00Z"
+    assert service.read().reference_time == "2026-10-02T17:40:00Z"
+    assert channels == ["model"]
+
+
+def test_mcp_time_resolution_matches_the_ui_policy(monkeypatch):
+    monkeypatch.setattr("weather_desk.mcp_server.DATA.latest_run", lambda: "2026-10-02T18:00:00Z")
+    resolved = resolve_reference_time("2026-10-02T17:40:00Z")
+
+    assert resolved["valid_time"] == "2026-10-02T18:00:00Z"
+    assert resolved["run"] == "2026-10-02T18:00:00Z"
+    assert resolved["step_hours"] == 0
+    assert resolved["offset_minutes"] == 20
 
 
 class FakeResponse:

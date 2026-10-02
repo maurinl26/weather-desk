@@ -1,7 +1,7 @@
 import pytest
 from PIL import Image
 
-from weather_desk.png_export import compose_png
+from weather_desk.png_export import compose_png, format_png_validity
 
 
 @pytest.mark.parametrize("format,size", [("square", (1080, 1080)), ("portrait", (1080, 1350))])
@@ -32,3 +32,26 @@ def test_png_export_rejects_unknown_format():
             credits="",
             format="wide",
         )
+
+
+def test_png_validity_labels_distinguish_requested_time_from_source_times():
+    manifest = {
+        "analysis": {"valid_time": "2026-10-02T17:40:00Z"},
+        "exported_at_utc": "2026-10-02T18:00:00Z",
+        "sources": [
+            {"kind": "wms", "valid_time": "2026-10-02T17:45:00Z"},
+            {
+                "kind": "grib_contours",
+                "valid_time": "2026-10-02T18:00:00Z",
+                "run": "2026-10-02T12:00:00Z",
+                "step_hours": 6,
+            },
+        ],
+    }
+
+    labels = format_png_validity(manifest)
+
+    assert "Référence demandée : 2026-10-02T17:40:00Z" in labels
+    assert "Satellite : 2026-10-02T17:45:00Z" in labels
+    assert "IFS : 2026-10-02T18:00:00Z · run 2026-10-02T12:00:00Z +6 h" in labels
+    assert "Émis : 2026-10-02T18:00:00Z" in labels
