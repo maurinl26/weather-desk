@@ -267,17 +267,44 @@ class WeatherDesk:
         self.png_preview_button.on_click(self._preview_png)
         self.png_target.param.watch(self._invalidate_png_preview, "value")
         self.png_format.param.watch(self._invalidate_png_preview, "value")
-        self.prompt = pn.widgets.TextAreaInput(
-            label="Décrire la vue souhaitée",
-            placeholder="Ex. Affiche six panneaux avec les vents à 10 m…",
-            height=90,
+        self.prompt = pn.widgets.TextInput(
+            label="",
+            placeholder="Ex. Compare le vent à 10 m, la pression et le satellite sur six panneaux…",
+            sizing_mode="stretch_width",
         )
-        self.prompt_button = pn.widgets.Button(label="Préparer une proposition", color="primary")
+        self.prompt_button = pn.widgets.Button(label="Préparer", color="primary", width=110)
         self.prompt_apply = pn.widgets.Button(
-            label="Confirmer et appliquer", color="success", disabled=True
+            label="Confirmer et appliquer", color="success", disabled=True, width=190
         )
-        self.prompt_result = pn.pane.Markdown(
-            "Le fournisseur LLM doit être configuré côté serveur."
+        self.prompt_result = pn.pane.Markdown("")
+        self.prompt_details = pn.Accordion(
+            ("Résultat de l’assistant", self.prompt_result),
+            active=[],
+            sizing_mode="stretch_width",
+            visible=False,
+        )
+        self.prompt_bar = pn.Column(
+            pn.Row(
+                pn.pane.Markdown("**Piloter Weather Desk**", width=180, margin=(0, 8, 0, 0)),
+                self.prompt,
+                self.prompt_button,
+                self.prompt_apply,
+                sizing_mode="stretch_width",
+                styles={"align-items": "center", "gap": "10px"},
+            ),
+            self.prompt_details,
+            sizing_mode="stretch_width",
+            styles={
+                "position": "fixed",
+                "bottom": "0",
+                "left": "0",
+                "width": "100vw",
+                "z-index": "100",
+                "background": "#ffffff",
+                "border-top": "1px solid #d5e0e6",
+                "padding": "12px 16px",
+                "box-shadow": "0 -4px 16px rgba(18, 48, 68, 0.12)",
+            },
         )
         self.pending_proposal = None
         self.prompt_button.on_click(self._prompt_proposal)
@@ -289,6 +316,7 @@ class WeatherDesk:
             title="Weather Desk",
             accent_base_color="#176b87",
             header_background="#123044",
+            header=[self.prompt_bar],
             sidebar=[
                 pn.pane.Markdown("## Poste multi-panneaux"),
                 self.layout,
@@ -301,11 +329,6 @@ class WeatherDesk:
                 self.png_format,
                 self.png_preview_button,
                 self.png_download,
-                pn.pane.Markdown("## Pilotage par prompt"),
-                self.prompt,
-                self.prompt_button,
-                self.prompt_result,
-                self.prompt_apply,
                 pn.pane.Markdown(
                     "L'analyse reste en mémoire pendant cette session. "
                     "**Exporter avant de fermer ou recharger la page.**"
@@ -361,6 +384,7 @@ class WeatherDesk:
                     collapsed=True,
                     sizing_mode="stretch_width",
                 ),
+                pn.Spacer(height=100),
             ],
             main_max_width="1600px",
         )
@@ -672,6 +696,8 @@ class WeatherDesk:
         self.prompt_button.disabled = True
         self.prompt_apply.disabled = True
         self.pending_proposal = None
+        self.prompt_details.visible = True
+        self.prompt_details.active = [0]
         self.prompt_result.object = "Préparation de la proposition…"
         try:
             if self.workspace_service is None:
