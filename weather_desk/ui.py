@@ -339,35 +339,26 @@ class WeatherDesk:
         self.prompt_apply = pn.widgets.Button(
             label="Confirmer et appliquer", color="success", disabled=True, width=190
         )
-        self.prompt_result = pn.pane.Markdown("")
+        self.prompt_result = pn.pane.Markdown("", styles={"color": "#f5f7fa"})
         self.prompt_details = pn.Accordion(
             ("Résultat de l’assistant", self.prompt_result),
             active=[],
             sizing_mode="stretch_width",
             visible=False,
+            styles={"color": "#f5f7fa"},
         )
         self.prompt_bar = pn.Column(
+            pn.pane.Markdown("### Assistant météo", styles={"color": "#f5f7fa"}),
+            self.prompt,
             pn.Row(
-                pn.pane.Markdown("**Piloter Weather Desk**", width=180, margin=(0, 8, 0, 0)),
-                self.prompt,
                 self.prompt_button,
                 self.prompt_apply,
                 sizing_mode="stretch_width",
-                styles={"align-items": "center", "gap": "10px"},
+                styles={"justify-content": "flex-start"},
             ),
             self.prompt_details,
             sizing_mode="stretch_width",
-            styles={
-                "position": "fixed",
-                "bottom": "0",
-                "left": "0",
-                "width": "100vw",
-                "z-index": "100",
-                "background": "#080a0d",
-                "border-top": "1px solid #252a31",
-                "padding": "12px 16px",
-                "box-shadow": "0 -4px 20px rgba(0, 0, 0, 0.55)",
-            },
+            styles={"align-items": "stretch"},
         )
         self.pending_proposal = None
         self.prompt_button.on_click(self._prompt_proposal)
@@ -381,27 +372,41 @@ class WeatherDesk:
             theme=pn.theme.DarkTheme,
             accent_base_color="#19a7b8",
             header_background="#050607",
-            header=[self.prompt_bar],
+            collapsed_sidebar=False,
+            sidebar_width=340,
             sidebar=[
-                pn.pane.Markdown("## Poste multi-panneaux"),
-                self.layout,
-                pn.pane.Markdown("## Analyses"),
-                self.analysis_name,
-                pn.Row(self.rename_analysis_button, self.duplicate_analysis_button),
-                self.analysis_select,
-                self.reload_conflict_button,
-                self.freeze_edition_button,
-                self.edition_select,
-                self.edition_download,
-                self.live.controls,
-                pn.pane.Markdown("## Contexte de l'analyse"),
-                *[self.fields[k] for k in ("zone", "valid_time", "confidence")],
-                pn.pane.Markdown("## Export"),
-                *self.downloads,
-                self.png_target,
-                self.png_format,
-                self.png_preview_button,
-                self.png_download,
+                self.prompt_bar,
+                pn.Accordion(
+                    ("Panneaux et couches", pn.Column(self.layout, self.live.controls)),
+                    (
+                        "Analyse",
+                        pn.Column(
+                            self.analysis_name,
+                            pn.Row(self.rename_analysis_button, self.duplicate_analysis_button),
+                            self.analysis_select,
+                            self.reload_conflict_button,
+                            self.freeze_edition_button,
+                            self.edition_select,
+                            self.edition_download,
+                        ),
+                    ),
+                    (
+                        "Contexte",
+                        pn.Column(*[self.fields[k] for k in ("zone", "valid_time", "confidence")]),
+                    ),
+                    (
+                        "Export",
+                        pn.Column(
+                            *self.downloads,
+                            self.png_target,
+                            self.png_format,
+                            self.png_preview_button,
+                            self.png_download,
+                        ),
+                    ),
+                    active=[0],
+                    sizing_mode="stretch_width",
+                ),
                 pn.pane.Markdown("Les textes et annotations sont sauvegardés automatiquement."),
             ],
             main=[
@@ -445,6 +450,7 @@ class WeatherDesk:
                     pn.Accordion(("Aperçu du Markdown exporté", self.preview)),
                     title="Bulletin",
                     collapsible=False,
+                    height=640,
                     sizing_mode="stretch_width",
                 ),
                 pn.Card(
@@ -454,7 +460,6 @@ class WeatherDesk:
                     collapsed=True,
                     sizing_mode="stretch_width",
                 ),
-                pn.Spacer(height=100),
             ],
             main_max_width="1600px",
         )

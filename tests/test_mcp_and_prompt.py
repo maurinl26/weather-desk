@@ -16,15 +16,25 @@ from weather_desk.ui import WeatherDesk
 from weather_desk.workspace import SQLiteWorkspaceRepository, WorkspaceService
 
 
-def test_prompt_uses_a_full_width_fixed_single_line_dock():
+def test_prompt_leads_a_collapsible_grouped_sidebar():
     desk = WeatherDesk()
 
     assert isinstance(desk.prompt, pn.widgets.TextInput)
-    assert desk.view.header[0] is desk.prompt_bar
-    assert desk.view.main[-1].height == 100
-    assert all(widget is not desk.prompt for widget in desk.view.sidebar)
-    assert desk.prompt_bar.styles["position"] == "fixed"
-    assert desk.prompt_bar.styles["width"] == "100vw"
+    assert desk.view.sidebar[0] is desk.prompt_bar
+    assert desk.view.collapsed_sidebar is False
+    assert desk.view.sidebar_width == 340
+    assert isinstance(desk.view.sidebar[1], pn.Accordion)
+    assert desk.prompt_result.styles["color"] == "#f5f7fa"
+    assert desk.prompt_details.styles["color"] == "#f5f7fa"
+
+
+def test_bulletin_editor_uses_a_map_panel_height():
+    desk = WeatherDesk()
+    bulletin = next(
+        card for card in desk.view.main if isinstance(card, pn.Card) and card.title == "Bulletin"
+    )
+
+    assert bulletin.height == desk.maps[0].height == 640
 
 
 def test_ui_reference_time_persists_through_the_shared_workspace_service(monkeypatch, tmp_path):
