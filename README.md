@@ -35,7 +35,7 @@ Utiliser les boutons d'actualisation pour récupérer de nouvelles données. Les
 4. Rédiger situation, analyse, impacts et incertitudes.
 5. Exporter le ZIP complet ou le Markdown, GeoJSON et manifeste séparément.
 
-L'export PNG capture le panneau principal ou la composition visible au format carré (1080 × 1080) ou portrait (1080 × 1350). Il utilise Bokeh avec Chromium/Playwright pour inclure les tuiles et le rendu du navigateur; titre, échéance et crédits sont intégrés à l'image. Aucun envoi vers Instagram n'est effectué.
+L'export PNG capture le panneau principal ou la composition visible au format carré (1080 × 1080) ou portrait (1080 × 1350). Un aperçu permet de contrôler l'image exacte avant d'activer le téléchargement. Le rendu conserve toute la composition et ajoute titre, échéance, couches/unités et crédits; le format rectangulaire peut donc laisser des bandes de fond. Bokeh et Chromium/Playwright capturent les tuiles et le rendu navigateur. Aucun envoi vers Instagram n'est effectué.
 
 Le serveur MCP Streamable HTTP fournit la lecture du workspace et du catalogue, une prévisualisation sans écriture, puis une commande distincte d'application avec contrôle de révision. Le déploiement le publie sous `/mcp` via Cloudflare Tunnel et exige un bearer token ainsi qu'une politique Cloudflare Access. Le pilotage par prompt passe par un endpoint OpenAI-compatible configuré côté serveur.
 

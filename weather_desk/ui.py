@@ -253,11 +253,20 @@ class WeatherDesk:
             value="portrait",
         )
         self.png_download = pn.widgets.FileDownload(
-            label="Exporter PNG",
+            label="Télécharger le PNG",
             filename="weather-desk.png",
-            callback=self.download_png,
             color="primary",
+            disabled=True,
         )
+        self.png_preview_button = pn.widgets.Button(label="Prévisualiser le PNG", color="primary")
+        self.png_preview_status = pn.pane.Markdown(
+            "Choisir le contenu et le format, puis générer un aperçu."
+        )
+        self._preview_generation = 0
+        self.png_preview_image = pn.pane.PNG(None, sizing_mode="scale_width", max_width=480)
+        self.png_preview_button.on_click(self._preview_png)
+        self.png_target.param.watch(self._invalidate_png_preview, "value")
+        self.png_format.param.watch(self._invalidate_png_preview, "value")
         self.prompt = pn.widgets.TextAreaInput(
             label="Décrire la vue souhaitée",
             placeholder="Ex. Affiche six panneaux avec les vents à 10 m…",
@@ -290,6 +299,7 @@ class WeatherDesk:
                 *self.downloads,
                 self.png_target,
                 self.png_format,
+                self.png_preview_button,
                 self.png_download,
                 pn.pane.Markdown("## Pilotage par prompt"),
                 self.prompt,
@@ -342,6 +352,13 @@ class WeatherDesk:
                     pn.Accordion(("Aperçu du Markdown exporté", self.preview)),
                     title="Bulletin",
                     collapsible=False,
+                    sizing_mode="stretch_width",
+                ),
+                pn.Card(
+                    self.png_preview_status,
+                    self.png_preview_image,
+                    title="Aperçu PNG avant publication",
+                    collapsed=True,
                     sizing_mode="stretch_width",
                 ),
             ],
@@ -476,8 +493,10 @@ class WeatherDesk:
         self._apply_camera(incoming.camera)
 
     def _camera_changed(self, attr, old, new):
-        if self.workspace_service is not None and not self._syncing_workspace:
-            self._camera_dirty = True
+        if not self._syncing_workspace:
+            self._camera_dirty = self.workspace_service is not None
+            if hasattr(self, "png_preview_button"):
+                self._invalidate_png_preview(None)
 
     def _camera_from_ranges(self):
         west, south = self.map_x_range.start, self.map_y_range.start
@@ -554,6 +573,8 @@ class WeatherDesk:
         return manifest, annotations
 
     def refresh(self):
+        if hasattr(self, "png_preview_button") and not self.png_download.disabled:
+            self._invalidate_png_preview(None)
         try:
             manifest, annotations = self.snapshot()
             self.preview.object = render_bulletin(manifest, annotations)
@@ -581,8 +602,19 @@ class WeatherDesk:
             return BytesIO(render_bulletin(manifest, annotations).encode())
         return BytesIO(json_bytes(annotations if kind == "geojson" else manifest))
 
-    async def download_png(self) -> BytesIO:
-        """Capture the visible plot composition in a bounded Playwright worker."""
+    def _invalidate_png_preview(self, event):
+        self._preview_generation += 1
+        self.png_download.file = None
+        self.png_download.disabled = True
+        self.png_preview_image.object = None
+        self.png_preview_status.object = "Format ou contenu modifié; générer un nouvel aperçu."
+
+    async def _preview_png(self, event):
+        """Render and show the exact PNG before enabling its download."""
+        generation = self._preview_generation
+        self.png_preview_button.disabled = True
+        self.png_download.disabled = True
+        self.png_preview_status.object = "Rendu de l'aperçu…"
         if self.png_target.value == "panel":
             target = self.maps[0]
             filename = "weather-desk-panel.png"
@@ -616,12 +648,25 @@ class WeatherDesk:
                 credits=credits,
                 format=self.png_format.value,
             )
-            self.png_download.filename = filename
-            return output
+            if generation != self._preview_generation:
+                self.png_preview_status.object = "La vue a changé pendant le rendu; réessayer."
+                return
+            suffix = "square" if self.png_format.value == "square" else "portrait"
+            self.png_download.filename = filename.replace(".png", f"-{suffix}.png")
+            self.png_download.file = output
+            self.png_preview_image.object = output.getvalue()
+            dimensions = "1080 × 1080" if self.png_format.value == "square" else "1080 × 1350"
+            self.png_preview_status.object = (
+                f"Aperçu **{dimensions} px**. "
+                "Le cadrage conserve toute la carte; les bandes de fond restent visibles."
+            )
+            self.png_download.disabled = False
         except Exception as exc:
             self.status.object = f"Export PNG impossible : {exc}"
             self.status.alert_type = "danger"
-            raise
+            self.png_preview_status.object = f"**Aperçu impossible :** {exc}"
+        finally:
+            self.png_preview_button.disabled = False
 
     async def _prompt_proposal(self, event):
         self.prompt_button.disabled = True
