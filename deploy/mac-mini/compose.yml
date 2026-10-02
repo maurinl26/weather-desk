@@ -21,6 +21,9 @@ services:
     environment:
       PANEL_BASIC_AUTH_JSON: ${PANEL_BASIC_AUTH_JSON:?Run the deploy script to create credentials}
       PANEL_COOKIE_SECRET: ${PANEL_COOKIE_SECRET:?Run the deploy script to create the cookie secret}
+      WEATHER_DESK_LLM_BASE_URL: ${WEATHER_DESK_LLM_BASE_URL:-}
+      WEATHER_DESK_LLM_MODEL: ${WEATHER_DESK_LLM_MODEL:-}
+      WEATHER_DESK_LLM_API_KEY: ${WEATHER_DESK_LLM_API_KEY:-}
     pids_limit: 128
     stop_grace_period: 30s
     healthcheck:
@@ -35,6 +38,47 @@ services:
         max-size: 10m
         max-file: "5"
 
+  weather-desk-mcp:
+    build:
+      context: ../..
+      dockerfile: deploy/mac-mini/Dockerfile
+    container_name: weather-desk-mcp
+    init: true
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    command: ["uvicorn", "weather_desk.mcp_server:app", "--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - weather-desk-data:/app/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      WEATHER_DESK_MCP_TOKEN: ${WEATHER_DESK_MCP_TOKEN:?Run the deploy script to create credentials}
+      WEATHER_DESK_DB: /app/data/workspace.sqlite3
+    pids_limit: 64
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8765/mcp)\" = 401"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
 volumes:
   weather-desk-data:
     name: weather-desk-data
+
+networks:
+  default:
+    name: weather-desk

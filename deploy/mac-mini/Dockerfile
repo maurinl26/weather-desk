@@ -6,6 +6,7 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATH="/app/.venv/bin:${PATH}"
 
 RUN apt-get update \
@@ -17,6 +18,8 @@ RUN apt-get update \
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --locked --no-dev --no-install-project
+RUN uv run playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright
 COPY app.py ./app.py
 COPY weather_desk ./weather_desk
 COPY deploy/mac-mini/container-entrypoint.sh /usr/local/bin/weather-desk-entrypoint

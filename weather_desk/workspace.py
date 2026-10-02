@@ -17,6 +17,7 @@ SCHEMA_VERSION = 1
 MAX_PANELS = 6
 _SLUG = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
 _LAYOUTS = {"auto", "1", "2-horizontal", "2-vertical", "4", "6"}
+_FIELDS = {"msl", "gh500", "t2m", "tp", "wind10m"}
 
 
 class WorkspaceError(ValueError):
@@ -64,6 +65,8 @@ class PanelConfig:
         for value in (self.satellite_product, self.model_id, *self.fields):
             if value is not None and (not isinstance(value, str) or not _SLUG.fullmatch(value)):
                 raise WorkspaceError("Identifiant de source ou de champ invalide.")
+        if set(self.fields) - _FIELDS:
+            raise WorkspaceError("Un champ météo n'est pas disponible dans le catalogue.")
         if len(set(self.fields)) != len(self.fields):
             raise WorkspaceError("Un champ ne peut apparaître qu'une fois dans un panneau.")
         if self.satellite_product is None and self.model_id is None:
@@ -249,6 +252,26 @@ class WorkspaceService:
     def read(self, workspace_id: str = "main") -> WorkspaceState:
         return self.repository.load(workspace_id)
 
+    def preview(
+        self,
+        commands: list[dict[str, Any]],
+        *,
+        expected_revision: int,
+        workspace_id: str = "main",
+    ) -> WorkspaceState:
+        """Validate a proposal against the current revision without persisting it."""
+        if not commands:
+            raise WorkspaceError("Une mutation doit contenir au moins une commande.")
+        state = self.read(workspace_id)
+        if state.revision != expected_revision:
+            raise WorkspaceConflict(
+                f"Workspace modifié depuis la révision {expected_revision} "
+                f"(révision actuelle : {state.revision})."
+            )
+        for command in commands:
+            state = _apply_command(state, command)
+        return state
+
     def apply(
         self,
         commands: list[dict[str, Any]],
@@ -264,14 +287,9 @@ class WorkspaceService:
             or expected_revision < 0
         ):
             raise WorkspaceError("Révision attendue invalide.")
-        state = self.read(workspace_id)
-        if state.revision != expected_revision:
-            raise WorkspaceConflict(
-                f"Workspace modifié depuis la révision {expected_revision} "
-                f"(révision actuelle : {state.revision})."
-            )
-        for command in commands:
-            state = _apply_command(state, command)
+        state = self.preview(
+            commands, expected_revision=expected_revision, workspace_id=workspace_id
+        )
         return self.repository.save(state, expected_revision)
 
 
@@ -279,6 +297,18 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
     if not isinstance(command, dict) or not isinstance(command.get("op"), str):
         raise WorkspaceError("Commande de workspace mal formée.")
     op = command["op"]
+    command_keys = {
+        "add_panel": {"op", "copy_from"},
+        "remove_panel": {"op", "panel_id"},
+        "configure_panel": {"op", "panel_id", "changes"},
+        "set_layout": {"op", "layout"},
+        "set_reference_time": {"op", "value"},
+        "set_camera": {"op", "camera"},
+        "set_camera_sync": {"op", "enabled"},
+        "set_annotations": {"op", "value"},
+    }
+    if op not in command_keys or set(command) - command_keys[op]:
+        raise WorkspaceError(f"Arguments de commande invalides : {op}.")
     panels = list(state.panels)
     if op == "add_panel":
         if len(panels) >= MAX_PANELS:

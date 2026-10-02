@@ -48,15 +48,24 @@ fi
 if [ ! -f "$CONFIG/cookie-secret" ]; then
   openssl rand -hex 32 > "$CONFIG/cookie-secret"
 fi
-chmod 600 "$CONFIG/users.json" "$CONFIG/access.txt" "$CONFIG/cookie-secret"
+if [ ! -f "$CONFIG/mcp-token" ]; then
+  openssl rand -hex 32 > "$CONFIG/mcp-token"
+fi
+if [ ! -f "$CONFIG/llm.env" ]; then
+  : > "$CONFIG/llm.env"
+fi
+chmod 600 "$CONFIG/users.json" "$CONFIG/access.txt" "$CONFIG/cookie-secret" \
+  "$CONFIG/mcp-token" "$CONFIG/llm.env"
 USERS_JSON="$(cat "$CONFIG/users.json")"
 COOKIE_SECRET="$(cat "$CONFIG/cookie-secret")"
+MCP_TOKEN="$(cat "$CONFIG/mcp-token")"
 {
   printf 'PANEL_BASIC_AUTH_JSON=%s\n' "$USERS_JSON"
   printf 'PANEL_COOKIE_SECRET=%s\n' "$COOKIE_SECRET"
+  printf 'WEATHER_DESK_MCP_TOKEN=%s\n' "$MCP_TOKEN"
 } > "$CONFIG/compose.env"
 chmod 600 "$CONFIG/compose.env"
-unset USERS_JSON COOKIE_SECRET
+unset USERS_JSON COOKIE_SECRET MCP_TOKEN
 
 TUNNEL_ID="$(cloudflared tunnel list --output json | /usr/bin/python3 -c 'import json,sys; print(next((t["id"] for t in json.load(sys.stdin) if t["name"] == "weather-desk"), ""))')"
 if [ -z "$TUNNEL_ID" ]; then
@@ -77,6 +86,7 @@ sed "s#REPLACE_ME#$USER#g" "$APP/deploy/mac-mini/pro.galerne.weather-desk-tunnel
 chmod 644 "$LAUNCH/pro.galerne.weather-desk-tunnel.plist"
 
 docker compose --env-file "$CONFIG/compose.env" \
+  --env-file "$CONFIG/llm.env" \
   -f "$APP/deploy/mac-mini/compose.yml" up -d --build
 GUI_UID="$(id -u)"
 LABEL=pro.galerne.weather-desk-tunnel

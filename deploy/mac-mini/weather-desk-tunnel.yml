@@ -3,5 +3,8 @@ credentials-file: /Users/loicmaurin/.cloudflared/REPLACE_WITH_TUNNEL_ID.json
 
 ingress:
   - hostname: weather-desk.galerne-routing.com
+    path: ^/mcp(/.*)?$
+    service: http://127.0.0.1:8765
+  - hostname: weather-desk.galerne-routing.com
     service: http://127.0.0.1:5006
   - service: http_status:404

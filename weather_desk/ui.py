@@ -1,6 +1,9 @@
 """Panel session and Bokeh annotations. Acquisition adapters will stay outside this module."""
 
+import asyncio
 import html
+import json
+import math
 import warnings
 from io import BytesIO
 from pathlib import PurePath
@@ -19,10 +22,13 @@ from weather_desk.analysis import (
     export_bundle,
     json_bytes,
     render_bulletin,
+    to_lonlat,
     to_mercator,
     utc_now,
 )
+from weather_desk.assistant import propose_commands
 from weather_desk.live import LiveLayers
+from weather_desk.png_export import prepare_png_document, render_png
 from weather_desk.workspace import WorkspaceConflict, WorkspaceService
 
 
@@ -162,7 +168,10 @@ class WeatherDesk:
         self.fields = {
             "zone": pn.widgets.TextInput(label="Zone", value="France / façade Atlantique"),
             "valid_time": pn.widgets.TextInput(
-                label="Échéance de l'analyse (UTC)", value=self.created
+                label="Échéance de l'analyse (UTC)",
+                value=(
+                    self.workspace_state.reference_time if self.workspace_state else self.created
+                ),
             ),
             "confidence": pn.widgets.Select(
                 label="Confiance", options=["faible", "moyenne", "forte"], value="moyenne"
@@ -184,6 +193,20 @@ class WeatherDesk:
         self.maps = [self._make_map(index + 1) for index in range(6)]
         self.map = self.maps[0]
         self.live = LiveLayers(self.maps, self.refresh)
+        if self.workspace_state:
+            first_panel = self.workspace_state.panels[0]
+            self.live.current_product = first_panel.satellite_product or self.live.current_product
+            self.live.model_fields.value = [
+                field
+                for field in first_panel.fields
+                if field in self.live.model_fields.options.values()
+            ]
+        self._camera_dirty = False
+        for prop in ("start", "end"):
+            self.map_x_range.on_change(prop, self._camera_changed)
+            self.map_y_range.on_change(prop, self._camera_changed)
+        if self.workspace_state:
+            self._apply_camera(self.workspace_state.camera)
         self.layout = pn.widgets.Select(
             label="Disposition des panneaux",
             options={
@@ -219,6 +242,46 @@ class WeatherDesk:
                 ("json", "Manifeste JSON", "manifest.json"),
             ]
         ]
+        self.png_target = pn.widgets.Select(
+            label="Contenu PNG",
+            options={"Panneau principal": "panel", "Composition visible": "workspace"},
+            value="workspace",
+        )
+        self.png_format = pn.widgets.Select(
+            label="Format",
+            options={"Carré · 1080 × 1080": "square", "Portrait · 1080 × 1350": "portrait"},
+            value="portrait",
+        )
+        self.png_download = pn.widgets.FileDownload(
+            label="Télécharger le PNG",
+            filename="weather-desk.png",
+            color="primary",
+            disabled=True,
+        )
+        self.png_preview_button = pn.widgets.Button(label="Prévisualiser le PNG", color="primary")
+        self.png_preview_status = pn.pane.Markdown(
+            "Choisir le contenu et le format, puis générer un aperçu."
+        )
+        self._preview_generation = 0
+        self.png_preview_image = pn.pane.PNG(None, sizing_mode="scale_width", max_width=480)
+        self.png_preview_button.on_click(self._preview_png)
+        self.png_target.param.watch(self._invalidate_png_preview, "value")
+        self.png_format.param.watch(self._invalidate_png_preview, "value")
+        self.prompt = pn.widgets.TextAreaInput(
+            label="Décrire la vue souhaitée",
+            placeholder="Ex. Affiche six panneaux avec les vents à 10 m…",
+            height=90,
+        )
+        self.prompt_button = pn.widgets.Button(label="Préparer une proposition", color="primary")
+        self.prompt_apply = pn.widgets.Button(
+            label="Confirmer et appliquer", color="success", disabled=True
+        )
+        self.prompt_result = pn.pane.Markdown(
+            "Le fournisseur LLM doit être configuré côté serveur."
+        )
+        self.pending_proposal = None
+        self.prompt_button.on_click(self._prompt_proposal)
+        self.prompt_apply.on_click(self._apply_prompt_proposal)
         for field in self.fields.values():
             field.sizing_mode = "stretch_width"
             field.param.watch(lambda event: self.refresh(), "value")
@@ -234,6 +297,15 @@ class WeatherDesk:
                 *[self.fields[k] for k in ("zone", "valid_time", "confidence")],
                 pn.pane.Markdown("## Export"),
                 *self.downloads,
+                self.png_target,
+                self.png_format,
+                self.png_preview_button,
+                self.png_download,
+                pn.pane.Markdown("## Pilotage par prompt"),
+                self.prompt,
+                self.prompt_button,
+                self.prompt_result,
+                self.prompt_apply,
                 pn.pane.Markdown(
                     "L'analyse reste en mémoire pendant cette session. "
                     "**Exporter avant de fermer ou recharger la page.**"
@@ -280,6 +352,13 @@ class WeatherDesk:
                     pn.Accordion(("Aperçu du Markdown exporté", self.preview)),
                     title="Bulletin",
                     collapsible=False,
+                    sizing_mode="stretch_width",
+                ),
+                pn.Card(
+                    self.png_preview_status,
+                    self.png_preview_image,
+                    title="Aperçu PNG avant publication",
+                    collapsed=True,
                     sizing_mode="stretch_width",
                 ),
             ],
@@ -372,14 +451,82 @@ class WeatherDesk:
             return
         incoming = self.workspace_service.read(self.workspace_state.workspace_id)
         if incoming.revision == self.workspace_state.revision:
+            if self._camera_dirty:
+                try:
+                    camera = self._camera_from_ranges()
+                    self.workspace_state = self.workspace_service.apply(
+                        [{"op": "set_camera", "camera": camera}],
+                        expected_revision=self.workspace_state.revision,
+                        workspace_id=self.workspace_state.workspace_id,
+                    )
+                except WorkspaceConflict:
+                    self.workspace_state = self.workspace_service.read(
+                        self.workspace_state.workspace_id
+                    )
+                    self._apply_workspace_state(self.workspace_state)
+                finally:
+                    self._camera_dirty = False
             return
         self.workspace_state = incoming
+        self._apply_workspace_state(incoming)
+
+    def _apply_workspace_state(self, incoming):
         self._syncing_workspace = True
         try:
             self.layout.value = incoming.layout
+            self.fields["valid_time"].value = incoming.reference_time
         finally:
             self._syncing_workspace = False
         self._apply_layout(incoming.layout, len(incoming.panels))
+        if incoming.panels:
+            panel = incoming.panels[0]
+            if panel.satellite_product:
+                self.live.current_product = panel.satellite_product
+            if (
+                panel.satellite_product
+                and panel.satellite_product in self.live.sat_product.options.values()
+            ):
+                self.live.sat_product.value = panel.satellite_product
+            self.live.model_fields.value = [
+                field for field in panel.fields if field in self.live.model_fields.options.values()
+            ]
+        self._apply_camera(incoming.camera)
+
+    def _camera_changed(self, attr, old, new):
+        if not self._syncing_workspace:
+            self._camera_dirty = self.workspace_service is not None
+            if hasattr(self, "png_preview_button"):
+                self._invalidate_png_preview(None)
+
+    def _camera_from_ranges(self):
+        west, south = self.map_x_range.start, self.map_y_range.start
+        east, north = self.map_x_range.end, self.map_y_range.end
+        longitude, latitude = to_lonlat((west + east) / 2, (south + north) / 2)
+        viewport_width = max(float(self.maps[0].width or 640), 1)
+        zoom = math.log2(40_075_016.686 * viewport_width / (256 * (east - west)))
+        return {
+            "longitude": longitude,
+            "latitude": latitude,
+            "zoom": max(0, min(24, zoom)),
+        }
+
+    def _apply_camera(self, camera):
+        center_x, center_y = to_mercator(camera.longitude, camera.latitude)
+        viewport_width = max(float(self.maps[0].width or 640), 1)
+        span_x = 40_075_016.686 * viewport_width / (256 * (2**camera.zoom))
+        span_y = span_x * (self.maps[0].height or 640) / viewport_width
+        self._syncing_workspace = True
+        try:
+            self.map_x_range.start, self.map_x_range.end = (
+                center_x - span_x / 2,
+                center_x + span_x / 2,
+            )
+            self.map_y_range.start, self.map_y_range.end = (
+                center_y - span_y / 2,
+                center_y + span_y / 2,
+            )
+        finally:
+            self._syncing_workspace = False
 
     def start(self):
         self.live.start()
@@ -426,6 +573,8 @@ class WeatherDesk:
         return manifest, annotations
 
     def refresh(self):
+        if hasattr(self, "png_preview_button") and not self.png_download.disabled:
+            self._invalidate_png_preview(None)
         try:
             manifest, annotations = self.snapshot()
             self.preview.object = render_bulletin(manifest, annotations)
@@ -452,3 +601,119 @@ class WeatherDesk:
         if kind == "md":
             return BytesIO(render_bulletin(manifest, annotations).encode())
         return BytesIO(json_bytes(annotations if kind == "geojson" else manifest))
+
+    def _invalidate_png_preview(self, event):
+        self._preview_generation += 1
+        self.png_download.file = None
+        self.png_download.disabled = True
+        self.png_preview_image.object = None
+        self.png_preview_status.object = "Format ou contenu modifié; générer un nouvel aperçu."
+
+    async def _preview_png(self, event):
+        """Render and show the exact PNG before enabling its download."""
+        generation = self._preview_generation
+        self.png_preview_button.disabled = True
+        self.png_download.disabled = True
+        self.png_preview_status.object = "Rendu de l'aperçu…"
+        if self.png_target.value == "panel":
+            target = self.maps[0]
+            filename = "weather-desk-panel.png"
+        else:
+            target = self.map_grid.get_root()
+            filename = "weather-desk-composition.png"
+        title = "Weather Desk — " + (self.fields["zone"].value or "Analyse météo")
+        metadata = self.live.metadata()
+        legend_parts = []
+        attributions = ["© OpenStreetMap contributors"]
+        for source in metadata:
+            if source.get("visible") is False:
+                continue
+            if source.get("kind") == "wms":
+                legend_parts.append(f"{source['source']} · {source['units']}")
+            for field_id, field in source.get("parameters", {}).items():
+                if source.get("visible_parameters", {}).get(field_id, True):
+                    legend_parts.append(f"{field['title']} ({field['units']})")
+            if source.get("attribution"):
+                attributions.append(source["attribution"])
+        legend = "; ".join(legend_parts) or "Fond cartographique"
+        credits = " · ".join(dict.fromkeys(attributions))
+        try:
+            html_document = prepare_png_document(target, format=self.png_format.value)
+            output = await asyncio.to_thread(
+                render_png,
+                html_document,
+                title=title,
+                valid_time=self.fields["valid_time"].value,
+                legend=legend,
+                credits=credits,
+                format=self.png_format.value,
+            )
+            if generation != self._preview_generation:
+                self.png_preview_status.object = "La vue a changé pendant le rendu; réessayer."
+                return
+            suffix = "square" if self.png_format.value == "square" else "portrait"
+            self.png_download.filename = filename.replace(".png", f"-{suffix}.png")
+            self.png_download.file = output
+            self.png_preview_image.object = output.getvalue()
+            dimensions = "1080 × 1080" if self.png_format.value == "square" else "1080 × 1350"
+            self.png_preview_status.object = (
+                f"Aperçu **{dimensions} px**. "
+                "Le cadrage conserve toute la carte; les bandes de fond restent visibles."
+            )
+            self.png_download.disabled = False
+        except Exception as exc:
+            self.status.object = f"Export PNG impossible : {exc}"
+            self.status.alert_type = "danger"
+            self.png_preview_status.object = f"**Aperçu impossible :** {exc}"
+        finally:
+            self.png_preview_button.disabled = False
+
+    async def _prompt_proposal(self, event):
+        self.prompt_button.disabled = True
+        self.prompt_apply.disabled = True
+        self.pending_proposal = None
+        self.prompt_result.object = "Préparation de la proposition…"
+        try:
+            if self.workspace_service is None:
+                raise RuntimeError("Le workspace partagé n'est pas disponible.")
+            proposal = await asyncio.to_thread(
+                propose_commands,
+                self.prompt.value,
+                self.workspace_service,
+                self.workspace_state.workspace_id,
+            )
+            self.pending_proposal = proposal
+            self.prompt_result.object = (
+                "**Proposition non appliquée — vérifiez les changements :**\n\n"
+                "```json\n"
+                + json.dumps(proposal["commands"], ensure_ascii=False, indent=2)
+                + "\n```\n\n"
+                f"Révision attendue : `{proposal['expected_revision']}`."
+            )
+            self.prompt_apply.disabled = False
+        except Exception as exc:
+            self.prompt_result.object = f"**Aucune modification effectuée :** {exc}"
+        finally:
+            self.prompt_button.disabled = False
+
+    def _apply_prompt_proposal(self, event):
+        proposal = self.pending_proposal
+        if proposal is None:
+            return
+        try:
+            self.workspace_state = self.workspace_service.apply(
+                proposal["commands"],
+                expected_revision=proposal["expected_revision"],
+                workspace_id=proposal["workspace_id"],
+            )
+            self._apply_workspace_state(self.workspace_state)
+            self.prompt_result.object = (
+                f"Proposition appliquée à la révision `{self.workspace_state.revision}`."
+            )
+        except WorkspaceConflict as exc:
+            self.prompt_result.object = f"**Proposition périmée :** {exc}. Recommencer le prompt."
+        except Exception as exc:
+            self.prompt_result.object = f"**Proposition refusée :** {exc}"
+        finally:
+            self.pending_proposal = None
+            self.prompt_apply.disabled = True

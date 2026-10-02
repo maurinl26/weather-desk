@@ -6,10 +6,15 @@ Le tunnel Cloudflare reste un agent `launchd` natif sur macOS. Il transmet vers 
 
 Le tunnel a sa propre configuration dans `~/.cloudflared/weather-desk.yml`; il ne modifie pas les routes des tunnels existants. Après le premier déploiement, créer dans la zone DNS Cloudflare `galerne-routing.com` un CNAME proxifié nommé `weather-desk`, pointant vers `<UUID-du-tunnel>.cfargotunnel.com` (l'UUID est affiché par le script). Le certificat `cloudflared` déjà installé sur le Mac mini est rattaché à une autre zone et ne peut pas créer cet enregistrement dans `galerne-routing.com`.
 
+Le tunnel route `/mcp` vers le conteneur MCP sur le port loopback 8765. Le serveur exige un bearer token dédié, stocké dans `~/.config/weather-desk/mcp-token`; ne le transmettre qu'au client MCP à configurer. Dans Cloudflare Zero Trust, créer une application Access auto-hébergée pour `weather-desk.galerne-routing.com/mcp*`, puis la restreindre aux clients attendus avec une règle service token. Configurer les en-têtes Cloudflare Access du client et `Authorization: Bearer <mcp-token>` : les deux contrôles doivent réussir. La connexion Panel ne protège pas cette route.
+
+L'assistant par prompt appelle côté serveur un endpoint OpenAI-compatible Chat Completions. Configurer `WEATHER_DESK_LLM_BASE_URL`, `WEATHER_DESK_LLM_MODEL` et, si nécessaire, `WEATHER_DESK_LLM_API_KEY` dans `~/.config/weather-desk/llm.env` (droits 600). Un prompt produit uniquement une proposition validée; l'interface affiche les commandes et la révision visée, puis n'applique qu'après clic sur **Confirmer et appliquer**. Une modification concurrente invalide la proposition.
+
 Le compte `maurin.loic.ac@gmail.com` et son mot de passe aléatoire sont conservés dans `~/.config/weather-desk/access.txt` avec les permissions `600`. Le cookie secret et le fichier JSON des utilisateurs sont dans le même répertoire, également protégés. Le déploiement réaffiche les identifiants existants sans les régénérer.
 
 ```sh
 ssh macmini 'cat ~/.config/weather-desk/access.txt'
+ssh macmini 'cat ~/.config/weather-desk/mcp-token'
 ssh macmini 'cd ~/weather-desk && docker compose --env-file ~/.config/weather-desk/compose.env -f deploy/mac-mini/compose.yml ps'
 ssh macmini 'cd ~/weather-desk && docker compose --env-file ~/.config/weather-desk/compose.env -f deploy/mac-mini/compose.yml logs -f weather-desk'
 ssh macmini 'tail -f ~/Library/Logs/weather-desk-tunnel.log'
