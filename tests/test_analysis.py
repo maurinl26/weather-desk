@@ -1,6 +1,7 @@
 import json
 from concurrent.futures import Future
 from io import BytesIO
+from types import SimpleNamespace
 from zipfile import ZipFile
 
 import pytest
@@ -153,6 +154,23 @@ def test_model_field_selection_is_saved_and_restored_with_the_workspace(tmp_path
 
     assert reopened.live.model_fields.value == ["gh500"]
     assert reopened.workspace_state.panels[0].fields == ("gh500",)
+
+
+def test_manual_ifs_run_and_step_become_the_persisted_reference_time(monkeypatch, tmp_path):
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    desk = WeatherDesk(service)
+    live = desk.live
+    monkeypatch.setattr(live, "load_model", lambda: None)
+    live._setting_controls = True
+    live.run.options = ["2026-10-02T12:00:00Z", "2026-10-02T06:00:00Z"]
+    live.run.value = "2026-10-02T12:00:00Z"
+    live.run.disabled = False
+    live._setting_controls = False
+
+    desk._manual_model_time_changed(SimpleNamespace(obj=live.step, new=6))
+
+    assert desk.fields["valid_time"].value == "2026-10-02T18:00:00Z"
+    assert service.read().reference_time == "2026-10-02T18:00:00Z"
 
 
 def test_bundle_contains_images_provenance_and_verifiable_checksums():
