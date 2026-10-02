@@ -757,6 +757,11 @@ class WeatherDesk:
         incoming = self.workspace_service.read(self.workspace_state.workspace_id)
         if self._has_local_conflict:
             return
+        if self._camera_dirty and incoming.revision != self.workspace_state.revision:
+            self._mark_workspace_conflict(
+                "une autre session a modifié le workspace avant la sauvegarde de la caméra"
+            )
+            return
         if incoming.revision == self.workspace_state.revision:
             if self._camera_dirty:
                 try:

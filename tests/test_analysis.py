@@ -144,6 +144,23 @@ def test_concurrent_edit_is_detected_without_overwriting_local_text(tmp_path):
     assert not first._has_local_conflict
 
 
+def test_remote_revision_does_not_overwrite_a_pending_camera_change(tmp_path):
+    database = tmp_path / "workspace.sqlite3"
+    service = WorkspaceService(SQLiteWorkspaceRepository(database))
+    first = WeatherDesk(service)
+    second = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+    second.fields["headline"].value = "Révision distante."
+    first.map_x_range.start += 250_000
+    local_start = first.map_x_range.start
+
+    first.sync_workspace()
+
+    assert first.map_x_range.start == local_start
+    assert first._has_local_conflict
+    first._reload_workspace_conflict(None)
+    assert first.fields["headline"].value == "Révision distante."
+
+
 def test_model_field_selection_is_saved_and_restored_with_the_workspace(tmp_path):
     database = tmp_path / "workspace.sqlite3"
     service = WorkspaceService(SQLiteWorkspaceRepository(database))
