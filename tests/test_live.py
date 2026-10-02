@@ -220,6 +220,33 @@ def test_worker_failure_preserves_last_good_model_and_reports_error():
     assert not desk.live.pending
 
 
+def test_projection_change_keeps_the_selected_satellite_frame():
+    desk = WeatherDesk()
+    latest = SatelliteFrame(
+        "2026-09-30T12:00:00Z",
+        b"latest",
+        np.full((IMAGE_SIZE[1], IMAGE_SIZE[0]), 0xFFFF0000, dtype=np.uint32),
+    )
+    earlier = SatelliteFrame(
+        "2026-09-30T11:45:00Z",
+        b"earlier",
+        np.full((IMAGE_SIZE[1], IMAGE_SIZE[0]), 0xFF00FF00, dtype=np.uint32),
+    )
+
+    desk.live.apply_satellite([latest])
+    desk.live._history_frame_loaded(earlier)
+    assert desk.live.selected_satellite().valid_time == latest.valid_time
+
+    desk.live.set_projection("lambert")
+
+    buffer_index = desk.live.sat_filter.indices[0]
+    assert desk.live.selected_satellite().valid_time == latest.valid_time
+    pixels = desk.live.sat_data.data["image"][buffer_index]
+    pixels = pixels[pixels != 0]
+    assert pixels.size > 0
+    assert np.all(pixels == 0xFFFF0000)
+
+
 def test_new_request_discards_old_result_and_close_cancels(monkeypatch):
     import weather_desk.live as module
 

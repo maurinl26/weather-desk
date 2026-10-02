@@ -10,8 +10,8 @@ import panel as pn
 from bokeh.models import CDSView, ColumnDataSource, HoverTool, IndexFilter
 
 from weather_desk.analysis import json_bytes
+from weather_desk.cartography import PROJECTIONS, reproject_lines, warp_rgba
 from weather_desk.data import (
-    BBOX,
     DATA,
     MODEL_FIELDS,
     SATELLITE_LAYER,
@@ -26,7 +26,7 @@ WORKERS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="weather-data")
 
 
 class LiveLayers:
-    def __init__(self, plot, changed, service=DATA):
+    def __init__(self, plot, changed, service=DATA, projection="mercator"):
         self.plots = list(plot) if isinstance(plot, (list, tuple)) else [plot]
         if not self.plots:
             raise ValueError("Au moins une carte est nécessaire.")
@@ -39,10 +39,16 @@ class LiveLayers:
         self._arrival_order: list[str] = []
         self._missing_frames: list[str] = []
         self.model: ModelFrame | None = None
+        self.projection = projection
         self._poller = None
         self._closed = False
         self._setting_controls = False
         self.sat_enabled = pn.widgets.Checkbox(label="Satellite", value=True)
+        self.projection_control = pn.widgets.Select(
+            label="Projection",
+            options={title: key for key, (title, _) in PROJECTIONS.items()},
+            value=projection,
+        )
         self.model_fields = pn.widgets.CheckBoxGroup(
             label="Champs IFS",
             options={spec.title: field_id for field_id, spec in MODEL_FIELDS.items()},
@@ -154,6 +160,7 @@ class LiveLayers:
             component.sizing_mode = "stretch_width"
         self.controls = pn.Column(
             pn.pane.Markdown("## Couches météo"),
+            self.projection_control,
             self.sat_enabled,
             self.opacity,
             self.player,
@@ -167,6 +174,28 @@ class LiveLayers:
             self.model_status,
             sizing_mode="stretch_width",
         )
+
+    def set_projection(self, projection: str):
+        if projection not in PROJECTIONS:
+            raise ValueError("Projection cartographique inconnue.")
+        self.projection = projection
+        if self.satellites:
+            selected = self.selected_satellite().valid_time
+            warped = [warp_rgba(frame.rgba, projection) for frame in self.satellites]
+            images = [item[0] for item in warped]
+            x, y, width, height = warped[0][1]
+            self.sat_data.data = dict(
+                image=list(images),
+                x=[x] * len(images),
+                y=[y] * len(images),
+                dw=[width] * len(images),
+                dh=[height] * len(images),
+            )
+            # Rebuilt buffers now follow chronological order, so arrival indexes
+            # and the browser's frame filter must be rebuilt with them.
+            self._arrival_order = [frame.valid_time for frame in self.satellites]
+            self._set_frame_order(selected)
+        self._project_model()
 
     def start(self):
         if self._poller is None:
@@ -305,9 +334,10 @@ class LiveLayers:
         selected = self.selected_satellite().valid_time
         self._arrival_order.append(frame.valid_time)
         self.satellites = sorted([*self.satellites, frame], key=lambda f: f.valid_time)
-        x0, y0, x1, y1 = BBOX
+        image, bounds = warp_rgba(frame.rgba, self.projection)
+        x0, y0, width, height = bounds
         # Stream only the new buffer, not every previously loaded image.
-        self.sat_data.stream(dict(image=[frame.rgba], x=[x0], y=[y0], dw=[x1 - x0], dh=[y1 - y0]))
+        self.sat_data.stream(dict(image=[image], x=[x0], y=[y0], dw=[width], dh=[height]))
         self._set_frame_order(selected)
         self._history_status()
         self._context_changed()
@@ -326,14 +356,16 @@ class LiveLayers:
         self.player.direction = 0
         self.satellites = sorted(frames, key=lambda f: f.valid_time)
         self._arrival_order = [f.valid_time for f in self.satellites]
-        x0, y0, x1, y1 = BBOX
         count = len(frames)
+        warped = [warp_rgba(frame.rgba, self.projection) for frame in self.satellites]
+        images = [item[0] for item in warped]
+        x0, y0, width, height = warped[0][1]
         self.sat_data.data = dict(
-            image=[f.rgba for f in self.satellites],
+            image=images,
             x=[x0] * count,
             y=[y0] * count,
-            dw=[x1 - x0] * count,
-            dh=[y1 - y0] * count,
+            dw=[width] * count,
+            dh=[height] * count,
         )
         self._set_frame_order(self.satellites[-1].valid_time)
         self._history_status()
@@ -371,13 +403,21 @@ class LiveLayers:
 
     def apply_model(self, frame):
         self.model = frame
-        fields = frame.fields or {"msl": frame.msl, "gh500": frame.gh}
-        for field_id, source in self.field_data.items():
-            source.data = fields.get(field_id, {"xs": [], "ys": [], "level": []})
+        self._project_model()
         self._sync_field_visibility()
         self.model_status.object = f"IFS +{frame.step} h · 0,25° · © ECMWF / CC BY 4.0"
         self.refresh_model.disabled = False
         self._context_changed()
+
+    def _project_model(self):
+        if self.model is None:
+            fields = {}
+        else:
+            fields = self.model.fields or {"msl": self.model.msl, "gh500": self.model.gh}
+        for field_id, source in self.field_data.items():
+            data = fields.get(field_id, {"xs": [], "ys": [], "level": []})
+            xs, ys = reproject_lines(data["xs"], data["ys"], self.projection)
+            source.data = {**data, "xs": xs, "ys": ys}
 
     def selected_satellite(self):
         if not self.satellites:
