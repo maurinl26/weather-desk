@@ -67,6 +67,8 @@ def test_prompt_returns_preview_and_does_not_apply(monkeypatch, tmp_path):
     assert service.read().revision == 0
     assert request_body["reasoning_effort"] == "none"
     assert '"op":"set_layout"' in request_body["messages"][0]["content"]
+    assert '"op":"set_projection"' in request_body["messages"][0]["content"]
+    assert request_body["messages"][1]["content"].find('"projections"') >= 0
 
 
 def test_mcp_only_applies_the_exact_confirmed_preview_once(monkeypatch, tmp_path):

@@ -12,6 +12,7 @@ dependencies = [
   "numpy>=2,<3",
   "panel>=1.9,<2",
   "Pillow>=12,<13",
+  "pyproj>=3.7,<4",
   "mcp>=1.26,<2",
   "playwright>=1.55,<2",
   "requests>=2.32,<3",

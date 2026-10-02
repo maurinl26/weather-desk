@@ -18,6 +18,7 @@ MAX_PANELS = 6
 _SLUG = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
 _LAYOUTS = {"auto", "1", "2-horizontal", "2-vertical", "4", "6"}
 _FIELDS = {"msl", "gh500", "t2m", "tp", "wind10m"}
+_PROJECTIONS = {"mercator", "lambert", "stereopolar"}
 
 
 class WorkspaceError(ValueError):
@@ -81,6 +82,7 @@ class WorkspaceState:
     reference_time: str = ""
     camera: Camera = Camera()
     camera_sync: bool = True
+    projection: str = "mercator"
     panels: tuple[PanelConfig, ...] = ()
     annotations: dict[str, Any] | None = None
     schema_version: int = SCHEMA_VERSION
@@ -125,6 +127,8 @@ class WorkspaceState:
         if parsed.tzinfo is None:
             raise WorkspaceError("L'échéance doit inclure son fuseau horaire.")
         self.camera.validate()
+        if not isinstance(self.projection, str) or self.projection not in _PROJECTIONS:
+            raise WorkspaceError("Projection cartographique inconnue.")
         if not isinstance(self.camera_sync, bool):
             raise WorkspaceError("camera_sync doit être booléen.")
         if self.annotations is not None and (
@@ -305,6 +309,7 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
         "set_reference_time": {"op", "value"},
         "set_camera": {"op", "camera"},
         "set_camera_sync": {"op", "enabled"},
+        "set_projection": {"op", "projection"},
         "set_annotations": {"op", "value"},
     }
     if op not in command_keys or set(command) - command_keys[op]:
@@ -374,6 +379,8 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
         result = replace(state, camera=Camera(**camera))
     elif op == "set_camera_sync":
         result = replace(state, camera_sync=command.get("enabled"))
+    elif op == "set_projection":
+        result = replace(state, projection=command.get("projection"))
     elif op == "set_annotations":
         result = replace(state, annotations=command.get("value"))
     else:

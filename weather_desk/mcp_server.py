@@ -16,6 +16,7 @@ from mcp.types import ToolAnnotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from weather_desk.cartography import PROJECTIONS
 from weather_desk.data import DATA, MODEL_FIELDS
 from weather_desk.workspace import SQLiteWorkspaceRepository, WorkspaceService
 
@@ -76,6 +77,7 @@ def get_catalogue() -> dict:
             for key, value in MODEL_FIELDS.items()
         ],
         "layouts": ["auto", "1", "2-horizontal", "2-vertical", "4", "6"],
+        "projections": list(PROJECTIONS),
     }
 
 

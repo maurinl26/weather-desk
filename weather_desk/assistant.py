@@ -7,6 +7,7 @@ import os
 
 import requests
 
+from weather_desk.cartography import PROJECTIONS
 from weather_desk.data import DATA, MODEL_FIELDS
 from weather_desk.workspace import WorkspaceService
 
@@ -24,6 +25,7 @@ def propose_commands(request: str, service: WorkspaceService, workspace_id: str 
     satellite_products = DATA.satellite_catalogue()
     catalogue = {
         "layouts": ["auto", "1", "2-horizontal", "2-vertical", "4", "6"],
+        "projections": list(PROJECTIONS),
         "models": [
             {"id": "ifs", "latest_run": DATA.latest_run(), "steps_hours": list(range(0, 73, 3))}
         ],
@@ -60,6 +62,7 @@ def propose_commands(request: str, service: WorkspaceService, workspace_id: str 
                     '{"op":"configure_panel","panel_id":"<existing panel id>",'
                     '"changes":{"model_id":"ifs","fields":["msl"]}}, '
                     '{"op":"set_layout","layout":"4"}, '
+                    '{"op":"set_projection","projection":"lambert"}, '
                     '{"op":"set_reference_time","value":"<ISO-8601 time>"}, '
                     'and {"op":"set_camera","camera":{"longitude":0,'
                     '"latitude":50,"zoom":4}}. Use only panel IDs and catalogue '

@@ -16,7 +16,6 @@ from bokeh.plotting import figure
 from PIL import Image, UnidentifiedImageError
 
 from weather_desk.analysis import (
-    MERCATOR_LIMIT,
     checksum,
     drawings_geojson,
     export_bundle,
@@ -27,6 +26,14 @@ from weather_desk.analysis import (
     utc_now,
 )
 from weather_desk.assistant import propose_commands
+from weather_desk.cartography import (
+    PROJECTIONS,
+    domain_bounds,
+    land_lines,
+    land_polygons,
+    project_xy,
+    transformer,
+)
 from weather_desk.live import LiveLayers
 from weather_desk.png_export import prepare_png_document, render_png
 from weather_desk.workspace import WorkspaceConflict, WorkspaceService
@@ -186,13 +193,21 @@ class WeatherDesk:
             SourceCard("model", "Modèle — IFS / AROME", self.refresh),
         ]
         self.layers = {}
-        west, south = to_mercator(-25, 32)
-        east, north = to_mercator(35, 65)
-        self.map_x_range = Range1d(west, east, bounds=(-MERCATOR_LIMIT, MERCATOR_LIMIT))
-        self.map_y_range = Range1d(south, north, bounds=(-MERCATOR_LIMIT, MERCATOR_LIMIT))
+        self.projection = self.workspace_state.projection if self.workspace_state else "mercator"
+        west, south, east, north = domain_bounds(self.projection)
+        self.map_x_range = Range1d(west, east)
+        self.map_y_range = Range1d(south, north)
+        self.tiles = []
+        self.land_sources = []
+        self.land_fill_sources = []
+        self.land_fill_renderers = []
         self.maps = [self._make_map(index + 1) for index in range(6)]
         self.map = self.maps[0]
-        self.live = LiveLayers(self.maps, self.refresh)
+        self.live = LiveLayers(self.maps, self.refresh, projection=self.projection)
+        for plot, renderer in zip(self.maps, self.land_fill_renderers, strict=True):
+            plot.renderers.remove(renderer)
+            plot.renderers.insert(1, renderer)
+        self.live.projection_control.param.watch(self._projection_changed, "value")
         if self.workspace_state:
             first_panel = self.workspace_state.panels[0]
             self.live.current_product = first_panel.satellite_product or self.live.current_product
@@ -395,20 +410,52 @@ class WeatherDesk:
             title=f"Panneau {index}",
             x_range=self.map_x_range,
             y_range=self.map_y_range,
-            x_axis_type="mercator",
-            y_axis_type="mercator",
+            x_axis_type=None,
+            y_axis_type=None,
             height=640,
             sizing_mode="stretch_width",
             tools="pan,wheel_zoom,reset,save",
             active_scroll="wheel_zoom",
             toolbar_location="above",
         )
-        plot.add_tile(
+        plot.background_fill_color = "#e7f0f3"
+        plot.xgrid.visible = False
+        plot.ygrid.visible = False
+        self.tiles = getattr(self, "tiles", [])
+        self.land_sources = getattr(self, "land_sources", [])
+        tile = plot.add_tile(
             WMTSTileSource(
                 url="https://tile.openstreetmap.org/{Z}/{X}/{Y}.png",
                 attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
             )
         )
+        tile.visible = self.projection == "mercator"
+        self.tiles.append(tile)
+        land_source = ColumnDataSource(dict(xs=[], ys=[]), name=f"land_outline_{index}")
+        land_xs, land_ys = land_lines(self.projection)
+        land_source.data = dict(xs=land_xs, ys=land_ys)
+        land_fill_source = ColumnDataSource(dict(xs=[], ys=[]), name=f"land_fill_{index}")
+        fill_xs, fill_ys = land_polygons(self.projection)
+        land_fill_source.data = dict(xs=fill_xs, ys=fill_ys)
+        land_fill = plot.patches(
+            xs="xs",
+            ys="ys",
+            source=land_fill_source,
+            fill_color="#dce6dc",
+            fill_alpha=0.92,
+            line_alpha=0,
+        )
+        self.land_fill_renderers.append(land_fill)
+        self.land_fill_sources.append(land_fill_source)
+        plot.multi_line(
+            xs="xs",
+            ys="ys",
+            source=land_source,
+            line_color="#546b74",
+            line_width=1,
+            line_alpha=0.9,
+        )
+        self.land_sources.append(land_source)
         for kind, label, color, geometry in [
             ("cold_front", "Front froid", "#1671d9", "LineString"),
             ("warm_front", "Front chaud", "#d73027", "LineString"),
@@ -436,6 +483,43 @@ class WeatherDesk:
                 ),
             )
         return plot
+
+    def _projection_changed(self, event):
+        if self._syncing_workspace:
+            return
+        self._switch_projection(event.new, persist=True)
+
+    def _switch_projection(self, projection, persist):
+        if projection == self.projection:
+            return
+        old = self.projection
+        camera = self._camera_from_ranges()
+        convert_old = transformer(old, inverse=True)
+        convert_new = transformer(projection)
+        for layer in self.layers.values():
+            data = layer["source"].data
+            xs, ys = [], []
+            for line_x, line_y in zip(data["xs"], data["ys"], strict=True):
+                mercator_x, mercator_y = convert_old(line_x, line_y)
+                x, y = convert_new(mercator_x, mercator_y)
+                xs.append(list(x))
+                ys.append(list(y))
+            layer["source"].data = {**data, "xs": xs, "ys": ys}
+        self.projection = projection
+        self.live.set_projection(projection)
+        land_xs, land_ys = land_lines(projection)
+        for source in self.land_sources:
+            source.data = dict(xs=land_xs, ys=land_ys)
+        fill_xs, fill_ys = land_polygons(projection)
+        for source in self.land_fill_sources:
+            source.data = dict(xs=fill_xs, ys=fill_ys)
+        for tile in self.tiles:
+            tile.visible = projection == "mercator"
+        if persist and self.workspace_service is not None:
+            self._camera_dirty = True
+        self._apply_camera_values(camera)
+        if hasattr(self, "png_preview_button"):
+            self._invalidate_png_preview(None)
 
     def _apply_layout(self, layout: str, panel_count: int | None = None):
         if layout == "auto":
@@ -479,7 +563,10 @@ class WeatherDesk:
                 try:
                     camera = self._camera_from_ranges()
                     self.workspace_state = self.workspace_service.apply(
-                        [{"op": "set_camera", "camera": camera}],
+                        [
+                            {"op": "set_camera", "camera": camera},
+                            {"op": "set_projection", "projection": self.projection},
+                        ],
                         expected_revision=self.workspace_state.revision,
                         workspace_id=self.workspace_state.workspace_id,
                     )
@@ -495,12 +582,16 @@ class WeatherDesk:
         self._apply_workspace_state(incoming)
 
     def _apply_workspace_state(self, incoming):
+        projection_changed = incoming.projection != self.projection
         self._syncing_workspace = True
         try:
             self.layout.value = incoming.layout
             self.fields["valid_time"].value = incoming.reference_time
+            self.live.projection_control.value = incoming.projection
         finally:
             self._syncing_workspace = False
+        if projection_changed:
+            self._set_projection(incoming.projection)
         self._apply_layout(incoming.layout, len(incoming.panels))
         if incoming.panels:
             panel = incoming.panels[0]
@@ -525,9 +616,12 @@ class WeatherDesk:
     def _camera_from_ranges(self):
         west, south = self.map_x_range.start, self.map_y_range.start
         east, north = self.map_x_range.end, self.map_y_range.end
-        longitude, latitude = to_lonlat((west + east) / 2, (south + north) / 2)
+        mercator_x, mercator_y = transformer(self.projection, inverse=True)(
+            (west + east) / 2, (south + north) / 2
+        )
+        longitude, latitude = to_lonlat(mercator_x, mercator_y)
         viewport_width = max(float(self.maps[0].width or 640), 1)
-        zoom = math.log2(40_075_016.686 * viewport_width / (256 * (east - west)))
+        zoom = math.log2(40_075_016.686 * viewport_width / (256 * max(east - west, 1)))
         return {
             "longitude": longitude,
             "latitude": latitude,
@@ -535,10 +629,25 @@ class WeatherDesk:
         }
 
     def _apply_camera(self, camera):
-        center_x, center_y = to_mercator(camera.longitude, camera.latitude)
+        center_x, center_y = project_xy(
+            *to_mercator(camera.longitude, camera.latitude), self.projection
+        )
         viewport_width = max(float(self.maps[0].width or 640), 1)
         span_x = 40_075_016.686 * viewport_width / (256 * (2**camera.zoom))
         span_y = span_x * (self.maps[0].height or 640) / viewport_width
+        self._apply_camera_values(camera, center=(center_x, center_y), span=(span_x, span_y))
+
+    def _apply_camera_values(self, camera, center=None, span=None):
+        if center is None or span is None:
+            center = project_xy(
+                *to_mercator(camera["longitude"], camera["latitude"]), self.projection
+            )
+            zoom = camera["zoom"]
+            viewport_width = max(float(self.maps[0].width or 640), 1)
+            span_x = 40_075_016.686 * viewport_width / (256 * (2**zoom))
+            span = (span_x, span_x * (self.maps[0].height or 640) / viewport_width)
+        center_x, center_y = center
+        span_x, span_y = span
         self._syncing_workspace = True
         try:
             self.map_x_range.start, self.map_x_range.end = (
@@ -551,6 +660,9 @@ class WeatherDesk:
             )
         finally:
             self._syncing_workspace = False
+
+    def _set_projection(self, projection):
+        self._switch_projection(projection, persist=False)
 
     def start(self):
         self.live.start()
@@ -568,13 +680,20 @@ class WeatherDesk:
         if errors:
             raise ValueError("Corriger les images invalides avant l'export.")
         fields = {key: widget.value for key, widget in self.fields.items()}
-        annotations = drawings_geojson(
-            {
-                key: {"data": layer["source"].data, "geometry": layer["geometry"]}
-                for key, layer in self.layers.items()
-            },
-            fields["valid_time"],
-        )
+        convert = transformer(self.projection, inverse=True)
+        drawing_layers = {}
+        for key, layer in self.layers.items():
+            data = layer["source"].data
+            xs, ys = [], []
+            for line_x, line_y in zip(data["xs"], data["ys"], strict=True):
+                x, y = convert(line_x, line_y)
+                xs.append(list(x))
+                ys.append(list(y))
+            drawing_layers[key] = {
+                "data": {**data, "xs": xs, "ys": ys},
+                "geometry": layer["geometry"],
+            }
+        annotations = drawings_geojson(drawing_layers, fields["valid_time"])
         manifest = {
             "schema_version": 1,
             "analysis_id": self.analysis_id,
@@ -583,7 +702,8 @@ class WeatherDesk:
             "analysis": fields,
             "sources": [source.metadata() for source in self.sources] + self.live.metadata(),
             "map_view": {
-                "crs": "EPSG:3857",
+                "crs": PROJECTIONS[self.projection][1],
+                "projection": self.projection,
                 "bbox": [
                     self.map.x_range.start,
                     self.map.y_range.start,
@@ -648,7 +768,11 @@ class WeatherDesk:
         title = "Weather Desk — " + (self.fields["zone"].value or "Analyse météo")
         metadata = self.live.metadata()
         legend_parts = []
-        attributions = ["© OpenStreetMap contributors"]
+        attributions = (
+            ["© OpenStreetMap contributors"]
+            if self.projection == "mercator"
+            else ["Natural Earth 1:110m (domaine public)"]
+        )
         for source in metadata:
             if source.get("visible") is False:
                 continue
