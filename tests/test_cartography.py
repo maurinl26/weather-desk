@@ -6,6 +6,7 @@ from weather_desk.cartography import (
     PROJECTIONS,
     domain_bounds,
     land_lines,
+    land_polygons,
     project_xy,
     reproject_lines,
     transformer,
@@ -38,6 +39,16 @@ def test_land_outlines_are_available_in_each_projection():
         assert len(xs) > 50
         assert len(xs) == len(ys)
         assert all(len(x) == len(y) and len(x) > 1 for x, y in zip(xs, ys, strict=True))
+
+
+def test_land_fills_clip_large_continent_geometry_to_the_display_region():
+    for projection in PROJECTIONS:
+        xs, ys = land_polygons(projection)
+        assert len(xs) > 10
+        assert len(xs) == len(ys)
+        assert all(
+            np.isfinite(x).all() and np.isfinite(y).all() for x, y in zip(xs, ys, strict=True)
+        )
 
 
 def test_satellite_raster_reprojection_keeps_pixels_and_masks_outside_domain():

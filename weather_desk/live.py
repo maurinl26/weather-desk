@@ -180,6 +180,7 @@ class LiveLayers:
             raise ValueError("Projection cartographique inconnue.")
         self.projection = projection
         if self.satellites:
+            selected = self.selected_satellite().valid_time
             warped = [warp_rgba(frame.rgba, projection) for frame in self.satellites]
             images = [item[0] for item in warped]
             x, y, width, height = warped[0][1]
@@ -190,6 +191,10 @@ class LiveLayers:
                 dw=[width] * len(images),
                 dh=[height] * len(images),
             )
+            # Rebuilt buffers now follow chronological order, so arrival indexes
+            # and the browser's frame filter must be rebuilt with them.
+            self._arrival_order = [frame.valid_time for frame in self.satellites]
+            self._set_frame_order(selected)
         self._project_model()
 
     def start(self):

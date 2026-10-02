@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from pyproj import CRS, Transformer
+from shapely.geometry import box, shape
 
 from weather_desk.analysis import EARTH_RADIUS, to_mercator
 from weather_desk.data import DOMAIN, IMAGE_SIZE
@@ -139,21 +140,27 @@ def land_lines(projection: str) -> tuple[list[list[float]], list[list[float]]]:
 
 @lru_cache(maxsize=3)
 def land_polygons(projection: str) -> tuple[list[list[float]], list[list[float]]]:
-    """Project intact exterior rings for continent fills; omit dateline-crossing polygons."""
+    """Clip land to the displayed region, then project its exterior rings."""
     document = json.loads(LAND_FILE.read_text(encoding="utf-8"))
     convert = transformer(projection)
+    west, south, east, north = DOMAIN
+    region = box(west, south, east, north)
     xs, ys = [], []
     for feature in document["features"]:
-        geometry = feature["geometry"]
+        clipped = shape(feature["geometry"]).intersection(region)
         polygons = (
-            [geometry["coordinates"]] if geometry["type"] == "Polygon" else geometry["coordinates"]
+            [clipped]
+            if clipped.geom_type == "Polygon"
+            else [
+                geometry
+                for geometry in getattr(clipped, "geoms", ())
+                if geometry.geom_type == "Polygon"
+            ]
         )
         for polygon in polygons:
-            ring = polygon[0]
+            ring = polygon.exterior.coords
             longitude = np.asarray([point[0] for point in ring])
             latitude = np.asarray([point[1] for point in ring])
-            if np.ptp(longitude) > 180:
-                continue
             x, y = convert(*_lonlat_to_mercator(longitude, latitude))
             valid = np.isfinite(x) & np.isfinite(y)
             if valid.sum() >= 3:
