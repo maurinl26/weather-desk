@@ -23,7 +23,7 @@ Les couches chargent automatiquement en arrière-plan à l'ouverture :
 - **IFS Open Data 0,25°** : sélection des isobares (hPa), du géopotentiel 500 hPa (dam), de la température à 2 m (°C), des précipitations cumulées (mm) et du vent à 10 m (m/s). Les unités sont converties et les valeurs s'affichent au survol des isolignes. Choix du run sur les dernières 24 h et de l'échéance de 0 à 72 h par pas de 3 h ; les runs proposés sont des candidats, validés lors du téléchargement.
 - **Domaine** : Atlantique / Europe, 35°W–45°E et 25–70°N. Hors de cette emprise, seuls le fond de carte et les tracés sont disponibles. Zoomer ne demande pas de nouvelles données ni n'augmente leur résolution.
 
-Le sélecteur **Projection** propose Mercator, Lambert conforme pour l'Europe et stéréopolaire nord. La projection est partagée avec le workspace et pilotable par prompt ou MCP. Les images satellite, isolignes IFS et tracés sont reprojetés ensemble; le fond est composé de tuiles OpenStreetMap en Mercator et de contours Natural Earth embarqués en Lambert/stéréopolaire. Les contours Natural Earth au 1:110m sont généralistes et moins détaillés qu'un fond routier.
+Weather Desk utilise maintenant une interface noire et un fond marin sombre, avec côtes Natural Earth visibles dans chaque projection. Le sélecteur **Projection** propose Mercator, Lambert conforme pour l'Europe et stéréopolaire nord. La projection est partagée avec le workspace et pilotable par prompt ou MCP. Les images satellite, isolignes IFS et tracés sont reprojetés ensemble. Les contours Natural Earth au 1:110m sont généralistes et moins détaillés qu'un fond routier.
 
 Les heures satellite, run IFS et validité IFS sont affichées séparément, avec leur décalage. L'échéance IFS initiale est choisie au plus près de l'image satellite disponible (ou de l'heure courante). **+0 h correspond au champ initial du produit de prévision IFS**, pas à une réanalyse. WV est un aperçu radiométrique fourni par EUMETView ; il ne sert pas à mesurer directement une température de brillance.
 
@@ -90,7 +90,7 @@ WEATHER_DESK_URL=http://127.0.0.1:5006/app node scripts/check_browser.cjs
 
 Le test navigateur accepte `WEATHER_DESK_PLAYWRIGHT` comme chemin vers un module Playwright déjà installé. Le client IFS de Galerne existant importe aussi sa pile d'apprentissage ; cette application utilise donc directement le même client officiel `ecmwf-opendata`, derrière un adaptateur léger. Aucun code de routage ou d'assurance n'est importé. Hermes reste à connecter.
 
-Sources : [EUMETView WMS](https://user.eumetsat.int/data-access/eumetview/resources), [ECMWF Open Data](https://www.ecmwf.int/en/forecasts/datasets/open-data), [client ECMWF](https://github.com/ecmwf/ecmwf-opendata) et contours [Natural Earth](https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_land.geojson) (domaine public). Attribution : EUMETSAT ; ECMWF (CC BY 4.0) ; fond Mercator © OpenStreetMap contributors.
+Sources : [EUMETView WMS](https://user.eumetsat.int/data-access/eumetview/resources), [ECMWF Open Data](https://www.ecmwf.int/en/forecasts/datasets/open-data), [client ECMWF](https://github.com/ecmwf/ecmwf-opendata) et contours [Natural Earth](https://github.com/nvkelso/natural-earth-vector/blob/master/geojson/ne_110m_land.geojson) (domaine public). Attribution : EUMETSAT ; ECMWF (CC BY 4.0) ; Natural Earth (domaine public).
 
 Voir [PLAN.md](PLAN.md) et [OPEN_SOURCE_REVIEW.md](OPEN_SOURCE_REVIEW.md) pour la suite et les choix de composants.
 

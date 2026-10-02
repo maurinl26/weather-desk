@@ -41,6 +41,18 @@ def test_land_outlines_are_available_in_each_projection():
         assert all(len(x) == len(y) and len(x) > 1 for x, y in zip(xs, ys, strict=True))
 
 
+def test_weather_desk_uses_a_black_panel_theme_and_dark_cartography():
+    import panel as pn
+
+    desk = WeatherDesk()
+
+    assert desk.view.theme is pn.theme.DarkTheme
+    assert desk.maps[0].background_fill_color == "#05070a"
+    assert desk.tiles[0].visible is False
+    assert desk.land_fill_renderers[0].glyph.fill_color == "#161b21"
+    assert desk.land_fill_renderers[0].glyph.fill_alpha == 0.7
+
+
 def test_land_fills_clip_large_continent_geometry_to_the_display_region():
     for projection in PROJECTIONS:
         xs, ys = land_polygons(projection)

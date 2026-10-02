@@ -363,10 +363,10 @@ class WeatherDesk:
                 "left": "0",
                 "width": "100vw",
                 "z-index": "100",
-                "background": "#ffffff",
-                "border-top": "1px solid #d5e0e6",
+                "background": "#080a0d",
+                "border-top": "1px solid #252a31",
                 "padding": "12px 16px",
-                "box-shadow": "0 -4px 16px rgba(18, 48, 68, 0.12)",
+                "box-shadow": "0 -4px 20px rgba(0, 0, 0, 0.55)",
             },
         )
         self.pending_proposal = None
@@ -378,8 +378,9 @@ class WeatherDesk:
                 field.param.watch(lambda event: self._editor_changed(), "value")
         self.view = pn.template.FastListTemplate(
             title="Weather Desk",
-            accent_base_color="#176b87",
-            header_background="#123044",
+            theme=pn.theme.DarkTheme,
+            accent_base_color="#19a7b8",
+            header_background="#050607",
             header=[self.prompt_bar],
             sidebar=[
                 pn.pane.Markdown("## Poste multi-panneaux"),
@@ -490,7 +491,7 @@ class WeatherDesk:
             active_scroll="wheel_zoom",
             toolbar_location="above",
         )
-        plot.background_fill_color = "#e7f0f3"
+        plot.background_fill_color = "#05070a"
         plot.xgrid.visible = False
         plot.ygrid.visible = False
         self.tiles = getattr(self, "tiles", [])
@@ -501,7 +502,8 @@ class WeatherDesk:
                 attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
             )
         )
-        tile.visible = self.projection == "mercator"
+        # Keep the black marine canvas independent of an external tile API key.
+        tile.visible = False
         self.tiles.append(tile)
         land_source = ColumnDataSource(dict(xs=[], ys=[]), name=f"land_outline_{index}")
         land_xs, land_ys = land_lines(self.projection)
@@ -513,8 +515,8 @@ class WeatherDesk:
             xs="xs",
             ys="ys",
             source=land_fill_source,
-            fill_color="#dce6dc",
-            fill_alpha=0.92,
+            fill_color="#161b21",
+            fill_alpha=0.7,
             line_alpha=0,
         )
         self.land_fill_renderers.append(land_fill)
@@ -523,16 +525,16 @@ class WeatherDesk:
             xs="xs",
             ys="ys",
             source=land_source,
-            line_color="#546b74",
-            line_width=1,
-            line_alpha=0.9,
+            line_color="#74818d",
+            line_width=1.1,
+            line_alpha=0.88,
         )
         self.land_sources.append(land_source)
         for kind, label, color, geometry in [
-            ("cold_front", "Front froid", "#1671d9", "LineString"),
-            ("warm_front", "Front chaud", "#d73027", "LineString"),
-            ("occlusion", "Occlusion", "#8e44ad", "LineString"),
-            ("area", "Zone d'intérêt", "#c56a00", "Polygon"),
+            ("cold_front", "Front froid", "#48a5ff", "LineString"),
+            ("warm_front", "Front chaud", "#ff5b64", "LineString"),
+            ("occlusion", "Occlusion", "#c28aff", "LineString"),
+            ("area", "Zone d'intérêt", "#ffbd4a", "Polygon"),
         ]:
             if kind in self.layers:
                 source = self.layers[kind]["source"]
@@ -586,7 +588,7 @@ class WeatherDesk:
         for source in self.land_fill_sources:
             source.data = dict(xs=fill_xs, ys=fill_ys)
         for tile in self.tiles:
-            tile.visible = projection == "mercator"
+            tile.visible = False
         if persist and self.workspace_service is not None:
             self._camera_dirty = True
         self._apply_camera_values(camera)
@@ -1142,11 +1144,7 @@ class WeatherDesk:
         title = "Weather Desk — " + (self.fields["zone"].value or "Analyse météo")
         metadata = self.live.metadata()
         legend_parts = []
-        attributions = (
-            ["© OpenStreetMap contributors"]
-            if self.projection == "mercator"
-            else ["Natural Earth 1:110m (domaine public)"]
-        )
+        attributions = ["Natural Earth 1:110m (domaine public)"]
         for source in metadata:
             if source.get("visible") is False:
                 continue
