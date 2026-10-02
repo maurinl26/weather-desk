@@ -90,4 +90,4 @@ Voir [PLAN.md](PLAN.md) et [OPEN_SOURCE_REVIEW.md](OPEN_SOURCE_REVIEW.md) pour l
 
 La spécification produit de référence pour la refonte multi-panneaux est [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md). Elle vise d'abord l'écran relié au Mac mini et remplace les pistes exploratoires des notes précédentes lorsqu'elles divergent. MCP, l'adaptateur AROME Météo-France et l'export PNG de composition restent à implémenter; l'API AROME cible nécessite un jeton OAuth2 serveur et renvoie les champs demandés en GRIB via WCS ([documentation officielle](https://confluence-meteofrance.atlassian.net/wiki/spaces/OpenDataMeteoFrance/pages/854032416/API%2BCibl%2Be%2BMod%2Bles)).
 
-Le déploiement persistant sur le Mac mini est documenté dans [deploy/mac-mini/README.md](deploy/mac-mini/README.md) et se lance avec `scripts/deploy_mac_mini.sh`.
+Le déploiement OrbStack sur le Mac mini est documenté dans [deploy/mac-mini/README.md](deploy/mac-mini/README.md) et se lance avec `scripts/deploy_mac_mini.sh`. L'application s'exécute dans un conteneur Compose; Cloudflare Tunnel reste géré par `launchd` sur l'hôte.

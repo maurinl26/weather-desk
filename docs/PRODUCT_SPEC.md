@@ -64,6 +64,8 @@ Panel + Bokeh (workspace UI, plein écran sur le Mac mini)
 - Garder Panel+Bokeh pour la première version multi-panneaux : le socle actuel fonctionne et permet de conserver les outils de dessin et le pipeline Python.
 - Utiliser une figure Bokeh par panneau; partager les sources de données et les résultats identiques au lieu de télécharger/décoder plusieurs fois la même trame.
 - Tester le backend WebGL sur les rasters et contours réellement utilisés, tout en conservant le repli Canvas. WebGL ne décharge ni le réseau ni le décodage GRIB.
+- Le backend Python fonctionne en CPU dans OrbStack. Le navigateur local peut utiliser le GPU du Mac via WebGL pour les glyphes Bokeh; cette accélération reste une mesure de rendu côté navigateur, pas une dépendance de calcul serveur.
+- Ne pas exiger le GPU ou le Neural Engine pour IFS, AROME, le décodage GRIB ou les isolignes. Si une inférence locale devient utile (classification nuageuse, détection de fronts ou assistant local), l’exécuter dans un petit service natif macOS/Core ML séparé : le GPU et le Neural Engine du Mac ne sont pas exposés aux conteneurs OrbStack.
 - N’adopter MapLibre ou une autre couche d’affichage que si une mesure sur le Mac mini révèle une limite concrète de Bokeh.
 - Un seul service d’application porte validations, catalogue et mutations. L’état métier ne vit pas dans des callbacks UI; les adapters n’importent pas Panel.
 - Conserver la provenance de chaque rendu : fournisseur, identifiant produit/paramètre, run, échéance réelle, CRS/emprise, unités et checksum de l’artefact source.
