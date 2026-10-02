@@ -5,7 +5,6 @@ import html
 import json
 import math
 import warnings
-from datetime import timedelta
 from io import BytesIO
 from pathlib import PurePath
 from urllib.parse import urlsplit
@@ -35,10 +34,9 @@ from weather_desk.cartography import (
     project_xy,
     transformer,
 )
-from weather_desk.data import parse_time
 from weather_desk.live import LiveLayers
 from weather_desk.png_export import format_png_validity, prepare_png_document, render_png
-from weather_desk.temporal import format_utc, resolve_ifs_time
+from weather_desk.temporal import resolve_ifs_time
 from weather_desk.workspace import WorkspaceConflict, WorkspaceService
 
 
@@ -224,8 +222,8 @@ class WeatherDesk:
         self.live.reference_time = self.fields["valid_time"].value
         self.live.model_fields.param.watch(self._panel_fields_changed, "value")
         self.live.sat_product.param.watch(self._panel_product_changed, "value")
-        self.live.run.param.watch(self._manual_model_time_changed, "value")
-        self.live.step.param.watch(self._manual_model_time_changed, "value_throttled")
+        self.live.run.param.watch(self._panel_model_selection_changed, "value")
+        self.live.step.param.watch(self._panel_model_selection_changed, "value_throttled")
         if self.workspace_state:
             self._restore_annotations(self.workspace_state.annotations)
         self.fields["valid_time"].param.watch(self._reference_time_changed, "value")
@@ -462,6 +460,12 @@ class WeatherDesk:
         if self.workspace_state:
             first_panel = self.workspace_state.panels[0]
             self.live.current_product = first_panel.satellite_product or self.live.current_product
+            preferred = (
+                (first_panel.model_run, first_panel.step_hours)
+                if first_panel.model_run is not None
+                else None
+            )
+            self.live.set_preferred_model_selection(preferred)
             self._syncing_workspace = True
             try:
                 self.live.model_fields.value = [
@@ -802,6 +806,10 @@ class WeatherDesk:
             try:
                 if panel.satellite_product:
                     self.live.current_product = panel.satellite_product
+                preferred = (
+                    (panel.model_run, panel.step_hours) if panel.model_run is not None else None
+                )
+                self.live.set_preferred_model_selection(preferred)
                 if (
                     panel.satellite_product
                     and panel.satellite_product in self.live.sat_product.options.values()
@@ -858,13 +866,13 @@ class WeatherDesk:
             return
         self._save_panel_changes({"satellite_product": event.new})
 
-    def _manual_model_time_changed(self, event):
+    def _panel_model_selection_changed(self, event):
         if self._syncing_workspace or self.live._setting_controls or not self.live.run.value:
             return
         step = event.new if event.obj is self.live.step else self.live.step.value
-        selected = format_utc(parse_time(self.live.run.value) + timedelta(hours=step))
-        if selected != self.fields["valid_time"].value:
-            self.fields["valid_time"].value = selected
+        selection = (self.live.run.value, step)
+        self.live.preferred_model_selection = selection
+        self._save_panel_changes({"model_run": selection[0], "step_hours": selection[1]})
 
     def _save_panel_changes(self, changes):
         try:

@@ -149,7 +149,7 @@ def test_invalid_time_and_schema_are_rejected(tmp_path):
             expected_revision=state.revision,
         )
     document = state.to_dict()
-    document["schema_version"] = 3
+    document["schema_version"] = 4
     with pytest.raises(WorkspaceError, match="Migration"):
         WorkspaceState.from_dict(document)
     assert service.read() == state
@@ -160,12 +160,33 @@ def test_schema_one_workspace_migrates_with_empty_editorial_draft():
     document = state.to_dict()
     document["schema_version"] = 1
     document.pop("editorial")
+    document.pop("name")
+    document["panels"] = [
+        {key: value for key, value in panel.items() if key not in {"model_run", "step_hours"}}
+        for panel in document["panels"]
+    ]
 
     migrated = WorkspaceState.from_dict(document)
 
-    assert migrated.schema_version == 2
+    assert migrated.schema_version == 3
     assert migrated.editorial["headline"] == ""
     assert migrated.annotations["features"] == []
+    assert migrated.panels[0].model_run is None
+
+
+def test_schema_two_workspace_migrates_model_selection_defaults():
+    document = WorkspaceState.default().to_dict()
+    document["schema_version"] = 2
+    document["panels"] = [
+        {key: value for key, value in panel.items() if key not in {"model_run", "step_hours"}}
+        for panel in document["panels"]
+    ]
+
+    migrated = WorkspaceState.from_dict(document)
+
+    assert migrated.schema_version == 3
+    assert migrated.panels[0].model_run is None
+    assert migrated.panels[0].step_hours is None
 
 
 def test_analysis_can_be_named_and_duplicated_without_sharing_future_edits(tmp_path):
@@ -259,3 +280,28 @@ def test_workspace_starts_with_the_existing_live_layers(tmp_path):
     assert state.panels[0].satellite_product == "msg_fes:wv062"
     assert state.panels[0].model_id == "ifs"
     assert state.panels[0].fields == ("msl", "gh500")
+
+
+def test_explicit_run_and_step_are_saved_and_reset_with_reference_time(tmp_path):
+    service = service_at(tmp_path / "workspace.sqlite3")
+    state = service.read()
+    panel = state.panels[0]
+    selected = service.apply(
+        [
+            {
+                "op": "configure_panel",
+                "panel_id": panel.panel_id,
+                "changes": {"model_run": "2026-10-02T06:00:00Z", "step_hours": 9},
+            }
+        ],
+        expected_revision=state.revision,
+    )
+
+    assert selected.panels[0].model_run == "2026-10-02T06:00:00Z"
+    assert selected.panels[0].step_hours == 9
+    cleared = service.apply(
+        [{"op": "set_reference_time", "value": "2026-10-02T15:00:00Z"}],
+        expected_revision=selected.revision,
+    )
+    assert cleared.panels[0].model_run is None
+    assert cleared.panels[0].step_hours is None

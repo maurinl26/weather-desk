@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_PANELS = 6
 _SLUG = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
 _LAYOUTS = {"auto", "1", "2-horizontal", "2-vertical", "4", "6"}
@@ -65,6 +65,8 @@ class PanelConfig:
     satellite_product: str | None = "msg_fes:wv062"
     model_id: str | None = "ifs"
     fields: tuple[str, ...] = ("msl", "gh500")
+    model_run: str | None = None
+    step_hours: int | None = None
 
     @classmethod
     def create(cls, **values: Any) -> PanelConfig:
@@ -75,7 +77,7 @@ class PanelConfig:
             raise WorkspaceError("Identifiant de panneau invalide.")
         if not isinstance(self.fields, tuple):
             raise WorkspaceError("Les champs doivent être une liste immuable d'identifiants.")
-        for value in (self.satellite_product, self.model_id, *self.fields):
+        for value in (self.satellite_product, self.model_id, self.model_run, *self.fields):
             if value is not None and (not isinstance(value, str) or not _SLUG.fullmatch(value)):
                 raise WorkspaceError("Identifiant de source ou de champ invalide.")
         if set(self.fields) - _FIELDS:
@@ -84,6 +86,22 @@ class PanelConfig:
             raise WorkspaceError("Un champ ne peut apparaître qu'une fois dans un panneau.")
         if self.satellite_product is None and self.model_id is None:
             raise WorkspaceError("Un panneau doit contenir une source satellite ou modèle.")
+        if self.model_run is not None:
+            try:
+                run = datetime.fromisoformat(self.model_run.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise WorkspaceError("Le run IFS doit être une date ISO-8601.") from exc
+            if run.tzinfo is None or run.hour % 6 or run.minute or run.second:
+                raise WorkspaceError("Le run IFS doit inclure un fuseau et être aligné sur 6 h.")
+        if (self.model_run is None) != (self.step_hours is None):
+            raise WorkspaceError("Le run et l'échéance IFS doivent être enregistrés ensemble.")
+        if self.step_hours is not None and (
+            not isinstance(self.step_hours, int)
+            or isinstance(self.step_hours, bool)
+            or not 0 <= self.step_hours <= 72
+            or self.step_hours % 3
+        ):
+            raise WorkspaceError("L'échéance IFS doit être un pas de 3 h entre 0 et 72 h.")
 
 
 @dataclass(frozen=True)
@@ -183,9 +201,15 @@ class WorkspaceState:
             data = dict(payload)
             version = data.get("schema_version", 1)
             if version == 1:
-                data["schema_version"] = SCHEMA_VERSION
                 data["editorial"] = WorkspaceState.default().editorial
                 data["name"] = "Analyse météo"
+                version = 2
+            if version == 2:
+                data["schema_version"] = SCHEMA_VERSION
+                data["panels"] = [
+                    {**panel, "model_run": None, "step_hours": None}
+                    for panel in data.get("panels", ())
+                ]
             elif version != SCHEMA_VERSION:
                 raise WorkspaceError(f"Migration requise pour la version {version}.")
             data["camera"] = Camera(**data.get("camera", {}))
@@ -548,6 +572,8 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
             "satellite_product",
             "model_id",
             "fields",
+            "model_run",
+            "step_hours",
         }:
             raise WorkspaceError("Configuration de panneau invalide.")
         changes = dict(changes)
@@ -580,7 +606,11 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
             panels.append(replace(panels[-1], panel_id=str(uuid4())))
         result = replace(state, layout=layout, panels=tuple(panels))
     elif op == "set_reference_time":
-        result = replace(state, reference_time=command.get("value"))
+        result = replace(
+            state,
+            reference_time=command.get("value"),
+            panels=tuple(replace(panel, model_run=None, step_hours=None) for panel in panels),
+        )
     elif op == "set_camera":
         camera = command.get("camera")
         if not isinstance(camera, dict) or set(camera) != {"longitude", "latitude", "zoom"}:

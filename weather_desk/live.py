@@ -46,6 +46,7 @@ class LiveLayers:
         self.model: ModelFrame | None = None
         self.reference_time: str | None = None
         self.requested_model: tuple[str, int, tuple[str, ...]] | None = None
+        self.preferred_model_selection: tuple[str, int] | None = None
         self.model_time_error: str | None = None
         self.requested_satellite_time: str | None = None
         self.satellite_time_error: str | None = None
@@ -419,15 +420,45 @@ class LiveLayers:
     def _run_loaded(self, run):
         self._setting_controls = True
         try:
+            options = ifs_run_candidates(run)
+            preferred = self.preferred_model_selection
+            if preferred and preferred[0] not in options:
+                self.model_time_error = (
+                    "Le run IFS enregistré n'est plus disponible dans le catalogue récent."
+                )
+                self.model_status.object = f"**IFS : {self.model_time_error}**"
+                self.refresh_model.disabled = False
+                self._context_changed()
+                return
             target = self.reference_time or (
                 self.satellites[-1].valid_time if self.satellites else format_utc(datetime.now(UTC))
             )
-            options = ifs_run_candidates(run)
-            resolved = resolve_ifs_time(target, available_runs=options)
-            self.run.options = list(dict.fromkeys([resolved.run, *options]))
-            self.run.value = resolved.run
+            resolved = None if preferred else resolve_ifs_time(target, available_runs=options)
+            selected_run, selected_step = preferred or (resolved.run, resolved.step_hours)
+            self.run.options = list(dict.fromkeys([selected_run, *options]))
+            self.run.value = selected_run
             self.run.disabled = False
-            self.step.value = resolved.step_hours
+            self.step.value = selected_step
+        finally:
+            self._setting_controls = False
+        self.load_model()
+
+    def set_preferred_model_selection(self, selection: tuple[str, int] | None):
+        self.preferred_model_selection = selection
+        if not selection or not self.run.options:
+            return
+        if selection[0] not in self.run.options:
+            self.model_time_error = (
+                "Le run IFS enregistré n'est plus disponible dans le catalogue récent."
+            )
+            self._context_changed()
+            return
+        if self.requested_model == (*selection, tuple(self.model_fields.value)):
+            return
+        self._setting_controls = True
+        try:
+            self.run.value = selection[0]
+            self.step.value = selection[1]
         finally:
             self._setting_controls = False
         self.load_model()
@@ -436,6 +467,7 @@ class LiveLayers:
         """Resolve each source independently against one requested UTC time."""
         requested = format_utc(parse_time(value))
         self.reference_time = requested
+        self.preferred_model_selection = None
         resolved = None
         try:
             resolved = resolve_ifs_time(value, available_runs=self.run.options or None)

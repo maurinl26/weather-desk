@@ -156,21 +156,34 @@ def test_model_field_selection_is_saved_and_restored_with_the_workspace(tmp_path
     assert reopened.workspace_state.panels[0].fields == ("gh500",)
 
 
-def test_manual_ifs_run_and_step_become_the_persisted_reference_time(monkeypatch, tmp_path):
+def test_manual_ifs_run_and_step_are_persisted_and_restored(monkeypatch, tmp_path):
     service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
     desk = WeatherDesk(service)
     live = desk.live
     monkeypatch.setattr(live, "load_model", lambda: None)
+    reference_time = service.read().reference_time
     live._setting_controls = True
     live.run.options = ["2026-10-02T12:00:00Z", "2026-10-02T06:00:00Z"]
     live.run.value = "2026-10-02T12:00:00Z"
     live.run.disabled = False
+    live.step.value = 6
     live._setting_controls = False
 
-    desk._manual_model_time_changed(SimpleNamespace(obj=live.step, new=6))
+    desk._panel_model_selection_changed(SimpleNamespace(obj=live.step, new=6))
 
-    assert desk.fields["valid_time"].value == "2026-10-02T18:00:00Z"
-    assert service.read().reference_time == "2026-10-02T18:00:00Z"
+    saved = service.read()
+    assert saved.reference_time == reference_time
+    assert saved.panels[0].model_run == "2026-10-02T12:00:00Z"
+    assert saved.panels[0].step_hours == 6
+
+    reopened = WeatherDesk(
+        WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    )
+    reopened_live = reopened.live
+    monkeypatch.setattr(reopened_live, "load_model", lambda: None)
+    reopened_live._run_loaded("2026-10-02T18:00:00Z")
+    assert reopened_live.run.value == "2026-10-02T12:00:00Z"
+    assert reopened_live.step.value == 6
 
 
 def test_bundle_contains_images_provenance_and_verifiable_checksums():
