@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_PANELS = 6
 _SLUG = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
 _LAYOUTS = {"auto", "1", "2-horizontal", "2-vertical", "4", "6"}
@@ -85,6 +85,7 @@ class WorkspaceState:
     projection: str = "mercator"
     panels: tuple[PanelConfig, ...] = ()
     annotations: dict[str, Any] | None = None
+    editorial: dict[str, str] | None = None
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -95,6 +96,14 @@ class WorkspaceState:
             reference_time=now,
             panels=(PanelConfig.create(),),
             annotations={"type": "FeatureCollection", "features": []},
+            editorial={
+                "zone": "France / façade Atlantique",
+                "confidence": "moyenne",
+                "headline": "",
+                "analysis": "",
+                "impacts": "",
+                "limitations": "",
+            },
         )
 
     def validate(self) -> None:
@@ -137,6 +146,13 @@ class WorkspaceState:
             or not isinstance(self.annotations.get("features"), list)
         ):
             raise WorkspaceError("Les annotations doivent être une FeatureCollection GeoJSON.")
+        if (
+            self.editorial is None
+            or set(self.editorial)
+            != {"zone", "confidence", "headline", "analysis", "impacts", "limitations"}
+            or not all(isinstance(value, str) for value in self.editorial.values())
+        ):
+            raise WorkspaceError("Le brouillon éditorial du workspace est invalide.")
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
@@ -151,7 +167,10 @@ class WorkspaceState:
         try:
             data = dict(payload)
             version = data.get("schema_version", 1)
-            if version != SCHEMA_VERSION:
+            if version == 1:
+                data["schema_version"] = SCHEMA_VERSION
+                data["editorial"] = WorkspaceState.default().editorial
+            elif version != SCHEMA_VERSION:
                 raise WorkspaceError(f"Migration requise pour la version {version}.")
             data["camera"] = Camera(**data.get("camera", {}))
             data["panels"] = tuple(
@@ -311,6 +330,7 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
         "set_camera_sync": {"op", "enabled"},
         "set_projection": {"op", "projection"},
         "set_annotations": {"op", "value"},
+        "set_editorial": {"op", "value"},
     }
     if op not in command_keys or set(command) - command_keys[op]:
         raise WorkspaceError(f"Arguments de commande invalides : {op}.")
@@ -383,6 +403,8 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
         result = replace(state, projection=command.get("projection"))
     elif op == "set_annotations":
         result = replace(state, annotations=command.get("value"))
+    elif op == "set_editorial":
+        result = replace(state, editorial=command.get("value"))
     else:
         raise WorkspaceError(f"Commande inconnue : {op}.")
     result.validate()

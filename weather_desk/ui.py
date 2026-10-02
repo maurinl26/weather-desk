@@ -173,8 +173,11 @@ class WeatherDesk:
         self.workspace_poller = None
         self.analysis_id = str(uuid4())
         self.created = utc_now()
+        editorial = (self.workspace_state.editorial or {}) if self.workspace_state else {}
         self.fields = {
-            "zone": pn.widgets.TextInput(label="Zone", value="France / façade Atlantique"),
+            "zone": pn.widgets.TextInput(
+                label="Zone", value=editorial.get("zone", "France / façade Atlantique")
+            ),
             "valid_time": pn.widgets.TextInput(
                 label="Échéance de l'analyse (UTC)",
                 value=(
@@ -182,12 +185,22 @@ class WeatherDesk:
                 ),
             ),
             "confidence": pn.widgets.Select(
-                label="Confiance", options=["faible", "moyenne", "forte"], value="moyenne"
+                label="Confiance",
+                options=["faible", "moyenne", "forte"],
+                value=editorial.get("confidence", "moyenne"),
             ),
-            "headline": pn.widgets.TextInput(label="Message principal"),
-            "analysis": pn.widgets.TextAreaInput(label="Analyse", height=160),
-            "impacts": pn.widgets.TextAreaInput(label="Impacts et décisions", height=120),
-            "limitations": pn.widgets.TextAreaInput(label="Limites et incertitudes", height=100),
+            "headline": pn.widgets.TextInput(
+                label="Message principal", value=editorial.get("headline", "")
+            ),
+            "analysis": pn.widgets.TextAreaInput(
+                label="Analyse", value=editorial.get("analysis", ""), height=160
+            ),
+            "impacts": pn.widgets.TextAreaInput(
+                label="Impacts et décisions", value=editorial.get("impacts", ""), height=120
+            ),
+            "limitations": pn.widgets.TextAreaInput(
+                label="Limites et incertitudes", value=editorial.get("limitations", ""), height=100
+            ),
         }
         self.sources = [
             SourceCard("satellite", "Satellite — vapeur d'eau / IR", self.refresh),
@@ -206,6 +219,8 @@ class WeatherDesk:
         self.map = self.maps[0]
         self.live = LiveLayers(self.maps, self.refresh, projection=self.projection)
         self.live.reference_time = self.fields["valid_time"].value
+        if self.workspace_state:
+            self._restore_annotations(self.workspace_state.annotations)
         self.fields["valid_time"].param.watch(self._reference_time_changed, "value")
         for plot, renderer in zip(self.maps, self.land_fill_renderers, strict=True):
             plot.renderers.remove(renderer)
@@ -327,9 +342,10 @@ class WeatherDesk:
         self.pending_proposal = None
         self.prompt_button.on_click(self._prompt_proposal)
         self.prompt_apply.on_click(self._apply_prompt_proposal)
-        for field in self.fields.values():
+        for key, field in self.fields.items():
             field.sizing_mode = "stretch_width"
-            field.param.watch(lambda event: self.refresh(), "value")
+            if key != "valid_time":
+                field.param.watch(lambda event: self._editor_changed(), "value")
         self.view = pn.template.FastListTemplate(
             title="Weather Desk",
             accent_base_color="#176b87",
@@ -470,7 +486,7 @@ class WeatherDesk:
             else:
                 source = ColumnDataSource(data={"xs": [], "ys": []}, name=kind)
                 self.layers[kind] = {"source": source, "geometry": geometry}
-                source.on_change("data", lambda attr, old, new: self.refresh())
+                source.on_change("data", lambda attr, old, new: self._editor_changed())
             kwargs = dict(xs="xs", ys="ys", source=source, line_color=color, line_width=3)
             if geometry == "Polygon":
                 renderer = plot.patches(**kwargs, fill_color=color, fill_alpha=0.15)
@@ -591,6 +607,9 @@ class WeatherDesk:
         try:
             self.layout.value = incoming.layout
             self.fields["valid_time"].value = incoming.reference_time
+            for key, value in (incoming.editorial or {}).items():
+                if key in self.fields:
+                    self.fields[key].value = value
             self.live.projection_control.value = incoming.projection
         finally:
             self._syncing_workspace = False
@@ -598,6 +617,7 @@ class WeatherDesk:
             self._set_projection(incoming.projection)
         if time_changed:
             self.live.set_reference_time(incoming.reference_time)
+        self._restore_annotations(incoming.annotations)
         self._apply_layout(incoming.layout, len(incoming.panels))
         if incoming.panels:
             panel = incoming.panels[0]
@@ -612,6 +632,81 @@ class WeatherDesk:
                 field for field in panel.fields if field in self.live.model_fields.options.values()
             ]
         self._apply_camera(incoming.camera)
+
+    def _editor_changed(self):
+        if self._syncing_workspace:
+            return
+        self.refresh()
+        if self.workspace_service is None or not hasattr(self, "layers"):
+            return
+        try:
+            state = self.workspace_service.apply(
+                [
+                    {
+                        "op": "set_editorial",
+                        "value": {
+                            key: self.fields[key].value
+                            for key in (
+                                "zone",
+                                "confidence",
+                                "headline",
+                                "analysis",
+                                "impacts",
+                                "limitations",
+                            )
+                        },
+                    },
+                    {"op": "set_annotations", "value": self._annotations_geojson()},
+                ],
+                expected_revision=self.workspace_state.revision,
+                workspace_id=self.workspace_state.workspace_id,
+            )
+            self.workspace_state = state
+        except WorkspaceConflict as exc:
+            self.status.object = f"Brouillon non sauvegardé : {exc} Rechargez la dernière révision."
+            self.status.alert_type = "danger"
+
+    def _annotations_geojson(self):
+        convert = transformer(self.projection, inverse=True)
+        drawing_layers = {}
+        for key, layer in self.layers.items():
+            data = layer["source"].data
+            xs, ys = [], []
+            for line_x, line_y in zip(data["xs"], data["ys"], strict=True):
+                x, y = convert(line_x, line_y)
+                xs.append(list(x))
+                ys.append(list(y))
+            drawing_layers[key] = {
+                "data": {**data, "xs": xs, "ys": ys},
+                "geometry": layer["geometry"],
+            }
+        return drawings_geojson(drawing_layers, self.fields["valid_time"].value)
+
+    def _restore_annotations(self, collection):
+        if not isinstance(collection, dict):
+            return
+        grouped = {key: {"xs": [], "ys": []} for key in self.layers}
+        convert = transformer(self.projection)
+        for feature in collection.get("features", []):
+            kind = feature.get("properties", {}).get("kind")
+            geometry = feature.get("geometry", {})
+            if kind not in grouped or geometry.get("type") != self.layers[kind]["geometry"]:
+                continue
+            coordinates = geometry.get("coordinates", [])
+            if geometry["type"] == "Polygon":
+                coordinates = coordinates[0] if coordinates else []
+            if len(coordinates) < (3 if geometry["type"] == "Polygon" else 2):
+                continue
+            mercator = [to_mercator(point[0], point[1]) for point in coordinates]
+            x, y = convert([point[0] for point in mercator], [point[1] for point in mercator])
+            grouped[kind]["xs"].append(list(x))
+            grouped[kind]["ys"].append(list(y))
+        self._syncing_workspace = True
+        try:
+            for kind, data in grouped.items():
+                self.layers[kind]["source"].data = data
+        finally:
+            self._syncing_workspace = False
 
     def _reference_time_changed(self, event):
         if self._syncing_workspace:

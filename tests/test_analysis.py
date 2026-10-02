@@ -69,6 +69,27 @@ def test_session_state_survives_edit_and_time_changes_gate_exports(monkeypatch):
     assert "model" in desk.live.pending
 
 
+def test_editorial_and_annotations_autosave_and_restore_across_sessions(tmp_path):
+    database = tmp_path / "workspace.sqlite3"
+    service = WorkspaceService(SQLiteWorkspaceRepository(database))
+    desk = WeatherDesk(service)
+    points = [to_mercator(-2, 45), to_mercator(-1, 48)]
+    desk.layers["cold_front"]["source"].data = {
+        "xs": [[point[0] for point in points]],
+        "ys": [[point[1] for point in points]],
+    }
+    desk.fields["headline"].value = "Front froid sur le golfe de Gascogne."
+    desk.fields["analysis"].value = "Renforcement du vent de secteur ouest."
+
+    reopened = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+
+    assert reopened.fields["headline"].value == "Front froid sur le golfe de Gascogne."
+    assert reopened.fields["analysis"].value == "Renforcement du vent de secteur ouest."
+    assert len(reopened.snapshot()[1]["features"]) == 1
+    coordinates = reopened.snapshot()[1]["features"][0]["geometry"]["coordinates"]
+    assert coordinates == [[-2.0, 45.0], [-1.0, 48.0]]
+
+
 def test_bundle_contains_images_provenance_and_verifiable_checksums():
     desk = WeatherDesk()
     satellite = desk.sources[0]

@@ -147,10 +147,23 @@ def test_invalid_time_and_schema_are_rejected(tmp_path):
             expected_revision=state.revision,
         )
     document = state.to_dict()
-    document["schema_version"] = 2
+    document["schema_version"] = 3
     with pytest.raises(WorkspaceError, match="Migration"):
         WorkspaceState.from_dict(document)
     assert service.read() == state
+
+
+def test_schema_one_workspace_migrates_with_empty_editorial_draft():
+    state = WorkspaceState.default()
+    document = state.to_dict()
+    document["schema_version"] = 1
+    document.pop("editorial")
+
+    migrated = WorkspaceState.from_dict(document)
+
+    assert migrated.schema_version == 2
+    assert migrated.editorial["headline"] == ""
+    assert migrated.annotations["features"] == []
 
 
 def test_workspace_starts_with_the_existing_live_layers(tmp_path):
