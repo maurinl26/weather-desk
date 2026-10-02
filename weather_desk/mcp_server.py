@@ -18,6 +18,7 @@ from starlette.responses import JSONResponse
 
 from weather_desk.cartography import PROJECTIONS
 from weather_desk.data import DATA, MODEL_FIELDS
+from weather_desk.temporal import ifs_run_candidates, resolve_ifs_time
 from weather_desk.workspace import SQLiteWorkspaceRepository, WorkspaceService
 
 
@@ -49,6 +50,25 @@ _PROPOSAL_LOCK = threading.Lock()
 def get_workspace(workspace_id: str = "main") -> dict:
     """Read the current workspace configuration and revision."""
     return _service().read(workspace_id).to_dict()
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+def resolve_reference_time(value: str) -> dict:
+    """Resolve a requested UTC time to the closest supported IFS run and valid step."""
+    latest_run = DATA.latest_run()
+    runs = ifs_run_candidates(latest_run)
+    resolved = resolve_ifs_time(value, available_runs=runs)
+    return {
+        "requested_time": resolved.requested_time,
+        "valid_time": resolved.valid_time,
+        "run": resolved.run,
+        "step_hours": resolved.step_hours,
+        "offset_minutes": resolved.offset_minutes,
+        "available_runs": runs,
+        "policy": (
+            "nearest 3-hour validity reachable from the latest four IFS runs, within 90 minutes"
+        ),
+    }
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))

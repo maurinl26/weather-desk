@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import panel as pn
 from bokeh.models import CDSView, ColumnDataSource, HoverTool, IndexFilter
@@ -17,8 +17,13 @@ from weather_desk.data import (
     SATELLITE_LAYER,
     ModelFrame,
     SatelliteFrame,
-    iso,
     parse_time,
+)
+from weather_desk.temporal import (
+    format_utc,
+    ifs_run_candidates,
+    resolve_ifs_time,
+    resolve_satellite_time,
 )
 
 LOG = logging.getLogger(__name__)
@@ -39,6 +44,11 @@ class LiveLayers:
         self._arrival_order: list[str] = []
         self._missing_frames: list[str] = []
         self.model: ModelFrame | None = None
+        self.reference_time: str | None = None
+        self.requested_model: tuple[str, int, tuple[str, ...]] | None = None
+        self.model_time_error: str | None = None
+        self.requested_satellite_time: str | None = None
+        self.satellite_time_error: str | None = None
         self.projection = projection
         self._poller = None
         self._closed = False
@@ -242,12 +252,15 @@ class LiveLayers:
                 if channel.startswith("satellite:"):
                     self._missing_frames.append(channel.split(":", 1)[1])
                     self._history_status()
+                    self._context_changed()
                 elif channel.startswith("sat"):
                     self.sat_status.object = f"**Satellite : {message}**"
                     self.refresh_sat.disabled = False
                 else:
+                    self.model_time_error = "Le chargement IFS demandé a échoué."
                     self.model_status.object = f"**IFS : {message}**"
                     self.refresh_model.disabled = False
+                    self._context_changed()
         if not self.pending and self._poller:
             self._poller.stop()
 
@@ -296,19 +309,33 @@ class LiveLayers:
             self.sat_status.object = f"**Satellite : aucune échéance pour {product.title}.**"
             return
         self._missing_frames = []
+        requested_time = product.times[-1]
+        self.requested_satellite_time = None
+        self.satellite_time_error = None
+        if self.reference_time:
+            try:
+                requested_time = resolve_satellite_time(
+                    self.reference_time, product.times
+                ).valid_time
+                self.requested_satellite_time = requested_time
+            except ValueError as exc:
+                self.requested_satellite_time = None
+                self.satellite_time_error = str(exc)
         self.refresh_sat.disabled = True
         self.player.disabled = True
         self.player.direction = 0
         self.sat_status.object = f"Chargement {product.title}…"
         self.submit(
             "satellite",
-            lambda: self.service.satellite(product.times[-1], product.product_id, product.title),
-            lambda frame: self._latest_satellite_loaded(frame, times, product),
+            lambda: self.service.satellite(requested_time, product.product_id, product.title),
+            lambda frame: self._initial_satellite_loaded(frame, times, product),
         )
 
-    def _latest_satellite_loaded(self, frame, times, product):
+    def _initial_satellite_loaded(self, frame, times, product):
         self.apply_satellite([frame])
-        for stamp in times[:-1]:
+        for stamp in times:
+            if stamp == frame.valid_time:
+                continue
             self.submit(
                 f"satellite:{stamp}",
                 lambda stamp=stamp: self.service.satellite(
@@ -316,7 +343,17 @@ class LiveLayers:
                 ),
                 self._history_frame_loaded,
             )
+        self._select_requested_satellite()
         self._history_status()
+
+    def _select_requested_satellite(self):
+        if not self.requested_satellite_time:
+            return
+        for index, frame in enumerate(self.satellites):
+            if frame.valid_time == self.requested_satellite_time:
+                self.player.value = index
+                self.sat_filter.indices = [self.frame_order.data["index"][index]]
+                return
 
     def _history_status(self):
         remaining = sum(key.startswith("satellite:") for key in self.pending)
@@ -339,6 +376,7 @@ class LiveLayers:
         # Stream only the new buffer, not every previously loaded image.
         self.sat_data.stream(dict(image=[image], x=[x0], y=[y0], dw=[width], dh=[height]))
         self._set_frame_order(selected)
+        self._select_requested_satellite()
         self._history_status()
         self._context_changed()
 
@@ -372,37 +410,96 @@ class LiveLayers:
         self._context_changed()
 
     def load_latest_model(self):
+        self.model_time_error = None
         self.refresh_model.disabled = True
         self.model_status.object = "Recherche du dernier run IFS…"
         self.submit("model", self.service.latest_run, self._run_loaded)
+        self._context_changed()
 
     def _run_loaded(self, run):
         self._setting_controls = True
         try:
-            stamp = parse_time(run)
-            self.run.options = [iso(stamp - timedelta(hours=6 * i)) for i in range(4)]
-            self.run.value = run
-            self.run.disabled = False
-            target = (
-                parse_time(self.satellites[-1].valid_time) if self.satellites else datetime.now(UTC)
+            target = self.reference_time or (
+                self.satellites[-1].valid_time if self.satellites else format_utc(datetime.now(UTC))
             )
-            self.step.value = max(0, min(72, round((target - stamp).total_seconds() / 10800) * 3))
+            options = ifs_run_candidates(run)
+            resolved = resolve_ifs_time(target, available_runs=options)
+            self.run.options = list(dict.fromkeys([resolved.run, *options]))
+            self.run.value = resolved.run
+            self.run.disabled = False
+            self.step.value = resolved.step_hours
         finally:
             self._setting_controls = False
         self.load_model()
+
+    def set_reference_time(self, value: str):
+        """Resolve each source independently against one requested UTC time."""
+        requested = format_utc(parse_time(value))
+        self.reference_time = requested
+        resolved = None
+        try:
+            resolved = resolve_ifs_time(value, available_runs=self.run.options or None)
+        except ValueError as exc:
+            self.model_time_error = str(exc)
+            previous = self.pending.pop("model", None)
+            if previous:
+                previous[0].cancel()
+        self.requested_satellite_time = None
+        self.satellite_time_error = None
+        if self.current_product in self.products:
+            product = self.products[self.current_product]
+            self.satellite_time_error = None
+            try:
+                satellite = resolve_satellite_time(self.reference_time, product.times)
+                self.requested_satellite_time = satellite.valid_time
+                if not any(frame.valid_time == satellite.valid_time for frame in self.satellites):
+                    channel = f"satellite:{satellite.valid_time}"
+                    if channel not in self.pending:
+                        self.submit(
+                            channel,
+                            lambda stamp=satellite.valid_time: self.service.satellite(
+                                stamp, product.product_id, product.title
+                            ),
+                            self._history_frame_loaded,
+                        )
+                self._select_requested_satellite()
+            except ValueError as exc:
+                self.requested_satellite_time = None
+                self.satellite_time_error = str(exc)
+        if resolved is None:
+            self._context_changed()
+            return
+        self.model_time_error = None
+        if self.run.value:
+            self._setting_controls = True
+            try:
+                self.run.options = list(dict.fromkeys([resolved.run, *self.run.options]))
+                self.run.value = resolved.run
+                self.step.value = resolved.step_hours
+            finally:
+                self._setting_controls = False
+            self.load_model()
+        elif not self.pending.get("model"):
+            self.load_latest_model()
+        else:
+            self._context_changed()
 
     def load_model(self):
         if self._setting_controls or not self.run.value:
             return
         run, step = self.run.value, self.step.value
+        self.model_time_error = None
         self.model_status.object = (
             f"Chargement IFS +{step} h… Les contours précédents restent visibles."
         )
         selected = tuple(self.model_fields.value)
+        self.requested_model = (run, step, selected)
         self.submit("model", lambda: self.service.model(run, step, selected), self.apply_model)
+        self._context_changed()
 
     def apply_model(self, frame):
         self.model = frame
+        self.model_time_error = None
         self._project_model()
         self._sync_field_visibility()
         self.model_status.object = f"IFS +{frame.step} h · 0,25° · © ECMWF / CC BY 4.0"
@@ -424,6 +521,33 @@ class LiveLayers:
             return None
         return self.satellites[min(self.player.value, len(self.satellites) - 1)]
 
+    def _model_matches_request(self):
+        if self.model is None or self.requested_model is None:
+            return self.model is None and self.requested_model is None
+        run, step, fields = self.requested_model
+        actual_fields = tuple(self.model.fields or {"msl": self.model.msl, "gh500": self.model.gh})
+        return (self.model.run, self.model.step, actual_fields) == (run, step, fields)
+
+    @property
+    def has_unresolved_model(self):
+        return (
+            bool(self.model_time_error or self.pending.get("model"))
+            or not self._model_matches_request()
+        )
+
+    @property
+    def has_unresolved_selection(self):
+        satellite_unresolved = bool(
+            self.satellite_time_error
+            or (
+                self.requested_satellite_time
+                and not any(
+                    frame.valid_time == self.requested_satellite_time for frame in self.satellites
+                )
+            )
+        )
+        return self.has_unresolved_model or satellite_unresolved
+
     def _sync_field_visibility(self):
         selected = set(self.model_fields.value)
         for field_id, renderers in self.field_renderers.items():
@@ -439,6 +563,11 @@ class LiveLayers:
                 f"**{satellite.product_title} : {satellite.valid_time}**"
                 + (" · ⚠ image de plus de 2 h" if age > 2 else "")
             )
+            if self.reference_time:
+                offset = (
+                    parse_time(satellite.valid_time) - parse_time(self.reference_time)
+                ).total_seconds() / 60
+                parts.append(f"Écart satellite à la référence : **{offset:+.0f} min**")
         if self.model:
             meta = self.model.metadata()
             parts.append(
@@ -450,6 +579,32 @@ class LiveLayers:
                     parse_time(meta["valid_time"]) - parse_time(satellite.valid_time)
                 ).total_seconds() / 3600
                 parts.append(f"Décalage IFS − satellite : **{delta:+.2f} h**")
+            if self.reference_time:
+                delta = (
+                    parse_time(meta["valid_time"]) - parse_time(self.reference_time)
+                ).total_seconds() / 3600
+                parts.append(
+                    f"Référence demandée : {self.reference_time} · "
+                    f"décalage IFS : **{delta:+.2f} h**"
+                )
+        if self.satellite_time_error:
+            parts.append(f"⚠ Satellite indisponible : {self.satellite_time_error}")
+        elif self.requested_satellite_time and not any(
+            frame.valid_time == self.requested_satellite_time for frame in self.satellites
+        ):
+            if (
+                self.requested_satellite_time in self._missing_frames
+                and f"satellite:{self.requested_satellite_time}" not in self.pending
+            ):
+                parts.append(f"⚠ Image satellite {self.requested_satellite_time} indisponible.")
+            else:
+                parts.append(f"Satellite {self.requested_satellite_time} en cours de chargement.")
+        if self.has_unresolved_selection:
+            parts.append(
+                "⚠ Chargement en cours ou dernière sélection indisponible; export suspendu."
+            )
+        if self.model_time_error:
+            parts.append(f"⚠ IFS : {self.model_time_error}")
         self.time_status.object = "  \n".join(parts) or "Chargement des sources en arrière-plan…"
         self.changed()
 
@@ -457,17 +612,29 @@ class LiveLayers:
         result = []
         satellite = self.selected_satellite()
         if satellite:
+            requested_offset = None
+            if self.reference_time:
+                try:
+                    requested_offset = resolve_satellite_time(
+                        self.reference_time,
+                        [self.requested_satellite_time or satellite.valid_time],
+                    ).offset_minutes
+                except ValueError:
+                    pass
             result.append(
                 {
                     **satellite.metadata(),
                     "visible": self.sat_enabled.value,
                     "opacity": self.opacity.value,
+                    "requested_reference_time": self.reference_time,
+                    "offset_from_requested_minutes": requested_offset,
                 }
             )
         if self.model:
             result.append(
                 {
                     **self.model.metadata(),
+                    "requested_reference_time": self.reference_time,
                     "visible_parameters": {
                         field_id: field_id in self.model_fields.value for field_id in MODEL_FIELDS
                     },

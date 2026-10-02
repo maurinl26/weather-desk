@@ -35,7 +35,8 @@ from weather_desk.cartography import (
     transformer,
 )
 from weather_desk.live import LiveLayers
-from weather_desk.png_export import prepare_png_document, render_png
+from weather_desk.png_export import format_png_validity, prepare_png_document, render_png
+from weather_desk.temporal import resolve_ifs_time
 from weather_desk.workspace import WorkspaceConflict, WorkspaceService
 
 
@@ -204,6 +205,8 @@ class WeatherDesk:
         self.maps = [self._make_map(index + 1) for index in range(6)]
         self.map = self.maps[0]
         self.live = LiveLayers(self.maps, self.refresh, projection=self.projection)
+        self.live.reference_time = self.fields["valid_time"].value
+        self.fields["valid_time"].param.watch(self._reference_time_changed, "value")
         for plot, renderer in zip(self.maps, self.land_fill_renderers, strict=True):
             plot.renderers.remove(renderer)
             plot.renderers.insert(1, renderer)
@@ -583,6 +586,7 @@ class WeatherDesk:
 
     def _apply_workspace_state(self, incoming):
         projection_changed = incoming.projection != self.projection
+        time_changed = incoming.reference_time != self.live.reference_time
         self._syncing_workspace = True
         try:
             self.layout.value = incoming.layout
@@ -592,6 +596,8 @@ class WeatherDesk:
             self._syncing_workspace = False
         if projection_changed:
             self._set_projection(incoming.projection)
+        if time_changed:
+            self.live.set_reference_time(incoming.reference_time)
         self._apply_layout(incoming.layout, len(incoming.panels))
         if incoming.panels:
             panel = incoming.panels[0]
@@ -606,6 +612,30 @@ class WeatherDesk:
                 field for field in panel.fields if field in self.live.model_fields.options.values()
             ]
         self._apply_camera(incoming.camera)
+
+    def _reference_time_changed(self, event):
+        if self._syncing_workspace:
+            return
+        try:
+            resolved = resolve_ifs_time(event.new)
+            self._syncing_workspace = True
+            try:
+                self.fields["valid_time"].value = resolved.requested_time
+            finally:
+                self._syncing_workspace = False
+            if self.workspace_service is not None:
+                self.workspace_state = self.workspace_service.apply(
+                    [{"op": "set_reference_time", "value": resolved.requested_time}],
+                    expected_revision=self.workspace_state.revision,
+                    workspace_id=self.workspace_state.workspace_id,
+                )
+            self.live.set_reference_time(resolved.requested_time)
+        except WorkspaceConflict:
+            self.sync_workspace()
+        except ValueError as exc:
+            self.live.time_status.object = f"**Heure de référence invalide : {exc}**"
+            self.status.object = str(exc)
+            self.status.alert_type = "danger"
 
     def _camera_changed(self, attr, old, new):
         if not self._syncing_workspace:
@@ -679,6 +709,10 @@ class WeatherDesk:
         errors = [source.error for source in self.sources if source.error]
         if errors:
             raise ValueError("Corriger les images invalides avant l'export.")
+        if self.live.has_unresolved_selection:
+            raise ValueError(
+                "Export suspendu : attendre le chargement du modèle correspondant à la sélection."
+            )
         fields = {key: widget.value for key, widget in self.fields.items()}
         convert = transformer(self.projection, inverse=True)
         drawing_layers = {}
@@ -786,12 +820,13 @@ class WeatherDesk:
         legend = "; ".join(legend_parts) or "Fond cartographique"
         credits = " · ".join(dict.fromkeys(attributions))
         try:
+            manifest, _ = self.snapshot()
             html_document = prepare_png_document(target, format=self.png_format.value)
             output = await asyncio.to_thread(
                 render_png,
                 html_document,
                 title=title,
-                valid_time=self.fields["valid_time"].value,
+                valid_time=format_png_validity(manifest),
                 legend=legend,
                 credits=credits,
                 format=self.png_format.value,

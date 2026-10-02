@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import Future
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -43,7 +44,7 @@ def test_polygon_closed_and_incomplete_gesture_omitted():
     assert feature["properties"]["valid_time"] == "2026-09-30T12:00:00Z"
 
 
-def test_session_state_survives_edit_and_is_not_shared():
+def test_session_state_survives_edit_and_time_changes_gate_exports(monkeypatch):
     desk = WeatherDesk()
     other = WeatherDesk()
     points = [to_mercator(-2, 45), to_mercator(-1, 48)]
@@ -54,10 +55,18 @@ def test_session_state_survives_edit_and_is_not_shared():
     assert len(desk.snapshot()[1]["features"]) == 1
     assert other.snapshot()[1]["features"] == []
     assert desk.analysis_id != other.analysis_id
+
+    def hold_request(channel, work, apply):
+        desk.live.pending[channel] = (Future(), apply)
+
+    monkeypatch.setattr(desk.live, "submit", hold_request)
     desk.fields["valid_time"].value = "2026-10-01T00:00:00Z"
-    assert desk.snapshot()[1]["features"][0]["properties"]["valid_time"] == "2026-10-01T00:00:00Z"
+    assert desk.live.reference_time == "2026-10-01T00:00:00Z"
+    with pytest.raises(ValueError, match="chargement du modèle"):
+        desk.snapshot()
     source.data = {"xs": [], "ys": []}
-    assert desk.snapshot()[1]["features"] == []
+    assert desk.layers["cold_front"]["source"].data == {"xs": [], "ys": []}
+    assert "model" in desk.live.pending
 
 
 def test_bundle_contains_images_provenance_and_verifiable_checksums():
@@ -151,12 +160,13 @@ def test_shared_workspace_layout_updates_another_browser_session(tmp_path):
     assert remote.map_grid.ncols == 3
 
 
-def test_workspace_commands_update_shared_camera_fields_and_valid_time(tmp_path):
+def test_workspace_commands_update_shared_camera_fields_and_valid_time(monkeypatch, tmp_path):
     from weather_desk.workspace import Camera
 
     service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
     screen = WeatherDesk(service)
     remote = WeatherDesk(service)
+    monkeypatch.setattr(remote.live, "submit", lambda channel, work, apply: None)
     state = service.read()
     service.apply(
         [

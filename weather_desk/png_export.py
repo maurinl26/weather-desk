@@ -20,6 +20,20 @@ FORMATS = {"square": (1080, 1080), "portrait": (1080, 1350)}
 LOG = logging.getLogger(__name__)
 
 
+def format_png_validity(manifest: dict) -> str:
+    """Keep requested, effective source, and emission times visible on the image."""
+    lines = [f"Référence demandée : {manifest['analysis']['valid_time']}"]
+    for source in manifest["sources"]:
+        if source.get("kind") == "wms":
+            lines.append(f"Satellite : {source['valid_time']}")
+        elif source.get("kind") == "grib_contours":
+            lines.append(
+                f"IFS : {source['valid_time']} · run {source['run']} +{source['step_hours']} h"
+            )
+    lines.append(f"Émis : {manifest['exported_at_utc']}")
+    return "\n".join(lines)
+
+
 def _font(size: int):
     try:
         return ImageFont.truetype("DejaVuSans.ttf", size)
@@ -39,7 +53,7 @@ def compose_png(
     if format not in FORMATS:
         raise ValueError("Format PNG inconnu.")
     width, height = FORMATS[format]
-    header_height, footer_height = 144, 86
+    header_height, footer_height = 184, 86
     available_height = height - header_height - footer_height
     map_image = map_image.convert("RGB")
     scale = min(width / map_image.width, available_height / map_image.height)
@@ -48,9 +62,15 @@ def compose_png(
     )
     canvas = Image.new("RGB", (width, height), "#102b3b")
     draw = ImageDraw.Draw(canvas)
-    draw.text((44, 28), title[:100], fill="white", font=_font(32))
-    draw.text((44, 76), f"Valide : {valid_time[:80]}", fill="#c7dbe5", font=_font(20))
-    draw.text((44, 111), f"Couches : {legend[:120]}", fill="#c7dbe5", font=_font(16))
+    draw.text((44, 22), title[:100], fill="white", font=_font(30))
+    draw.multiline_text(
+        (44, 64),
+        valid_time[:320],
+        fill="#c7dbe5",
+        font=_font(14),
+        spacing=3,
+    )
+    draw.text((44, 151), f"Couches : {legend[:120]}", fill="#c7dbe5", font=_font(13))
     x = (width - map_image.width) // 2
     y = header_height + (available_height - map_image.height) // 2
     canvas.paste(map_image, (x, y))

@@ -10,6 +10,7 @@ from weather_desk.mcp_server import (
     BearerTokenMiddleware,
     apply_workspace_commands,
     preview_workspace_commands,
+    resolve_reference_time,
 )
 from weather_desk.ui import WeatherDesk
 from weather_desk.workspace import SQLiteWorkspaceRepository, WorkspaceService
@@ -24,6 +25,33 @@ def test_prompt_uses_a_full_width_fixed_single_line_dock():
     assert all(widget is not desk.prompt for widget in desk.view.sidebar)
     assert desk.prompt_bar.styles["position"] == "fixed"
     assert desk.prompt_bar.styles["width"] == "100vw"
+
+
+def test_ui_reference_time_persists_through_the_shared_workspace_service(monkeypatch, tmp_path):
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    desk = WeatherDesk(service)
+    channels = []
+    monkeypatch.setattr(
+        desk.live,
+        "submit",
+        lambda channel, work, apply: channels.append(channel),
+    )
+
+    desk.fields["valid_time"].value = "2026-10-02T17:40:00+00:00"
+
+    assert desk.live.reference_time == "2026-10-02T17:40:00Z"
+    assert service.read().reference_time == "2026-10-02T17:40:00Z"
+    assert channels == ["model"]
+
+
+def test_mcp_time_resolution_matches_the_ui_policy(monkeypatch):
+    monkeypatch.setattr("weather_desk.mcp_server.DATA.latest_run", lambda: "2026-10-02T18:00:00Z")
+    resolved = resolve_reference_time("2026-10-02T17:40:00Z")
+
+    assert resolved["valid_time"] == "2026-10-02T18:00:00Z"
+    assert resolved["run"] == "2026-10-02T18:00:00Z"
+    assert resolved["step_hours"] == 0
+    assert resolved["offset_minutes"] == 20
 
 
 class FakeResponse:
