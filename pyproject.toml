@@ -1,0 +1,36 @@
+[project]
+name = "weather-desk"
+version = "0.1.0"
+description = "Poste personnel d'analyse météo et de rédaction de bulletins"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "bokeh>=3.9,<3.10",
+  "contourpy>=1.3,<2",
+  "ecmwf-opendata>=0.3,<1",
+  "eccodes>=2.40,<3",
+  "numpy>=2,<3",
+  "panel>=1.9,<2",
+  "Pillow>=12,<13",
+  "requests>=2.32,<3",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<10",
+  "ruff>=0.12,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

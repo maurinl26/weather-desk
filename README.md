@@ -11,16 +11,16 @@ uv run panel serve app.py --address 127.0.0.1 --port 5006 \
   --allow-websocket-origin 127.0.0.1:5006 --show
 ```
 
-Ouvrir <http://127.0.0.1:5006/app>. Python 3.12 ; versions Python fixées dans `uv.lock`. **ecCodes natif doit être installé** pour le décodage GRIB (`brew install eccodes` sur macOS si nécessaire). Le poste de développement dispose d'ecCodes 2.47.0. Sans uv, installer `requirements.txt` dans un environnement Python 3.12.
+Ouvrir <http://127.0.0.1:5006/app>. Python 3.12 est sélectionné par `.python-version` et les dépendances sont fixées dans `uv.lock`. **ecCodes natif doit être installé** pour le décodage GRIB (`brew install eccodes` sur macOS si nécessaire). Installe `uv`, puis lance `uv sync --locked`.
 
-Serveur local sans authentification. Pour consulter le serveur du Mac mini à distance, utiliser un tunnel SSH privé ; ne pas exposer directement le port.
+Le démarrage ci-dessus sert au développement local sans authentification. Le déploiement Mac mini écoute seulement sur `127.0.0.1`; l'accès distant passe par un tunnel Cloudflare dédié et une page de connexion Panel. Ne pas exposer directement le port 5006.
 
 ## Carte synoptique
 
 Les couches chargent automatiquement en arrière-plan à l'ouverture :
 
 - **Vapeur d'eau** : SEVIRI WV6.2 µm, EUMETSAT EUMETView WMS. Le catalogue fournit les heures disponibles, puis le serveur demande les images en EPSG:3857, projection de la carte. Dernière image affichée d'abord, puis préchargement de six images au maximum, nominalement espacées de 15 minutes. Si une image manque, la séquence disponible reste utilisable et le manque est signalé.
-- **IFS Open Data 0,25°** : isobares au niveau de la mer (blanc, hPa, pas de 4) et hauteur géopotentielle à 500 hPa (jaune pointillé, dam, pas de 6). La valeur s'affiche au survol d'un contour. Choix du run sur les dernières 24 h et de l'échéance de 0 à 72 h par pas de 3 h ; les runs proposés sont des candidats, validés lors du téléchargement.
+- **IFS Open Data 0,25°** : sélection des isobares (hPa), du géopotentiel 500 hPa (dam), de la température à 2 m (°C), des précipitations cumulées (mm) et du vent à 10 m (m/s). Les unités sont converties et les valeurs s'affichent au survol des isolignes. Choix du run sur les dernières 24 h et de l'échéance de 0 à 72 h par pas de 3 h ; les runs proposés sont des candidats, validés lors du téléchargement.
 - **Domaine** : Atlantique / Europe, 35°W–45°E et 25–70°N. Hors de cette emprise, seuls le fond de carte et les tracés sont disponibles. Zoomer ne demande pas de nouvelles données ni n'augmente leur résolution.
 
 Les heures satellite, run IFS et validité IFS sont affichées séparément, avec leur décalage. L'échéance IFS initiale est choisie au plus près de l'image satellite disponible (ou de l'heure courante). **+0 h correspond au champ initial du produit de prévision IFS**, pas à une réanalyse. WV est un aperçu radiométrique fourni par EUMETView ; il ne sert pas à mesurer directement une température de brillance.
@@ -41,6 +41,8 @@ Le volet « Images de référence » conserve les imports PNG/JPEG/WebP et URL d
 
 **Exporter avant de fermer ou recharger la session : pas encore de sauvegarde automatique ni de réimport d'analyse.** Les fichiers météo en cache ne constituent pas une sauvegarde du bulletin ou des tracés.
 
+Le socle multi-panneaux est en cours : disposition de 1 à 6 cartes synchronisées, stockée dans `data/workspace.sqlite3` et partagée entre sessions du navigateur. La caméra et les annotations sont communes aux cartes d'une session; leur synchronisation entre sessions et leur persistance restent à brancher. Les configurations indépendantes par panneau restent à brancher. Le catalogue EUMETSAT et les champs IFS sont sélectionnables, mais leurs contrôles sont encore communs aux panneaux.
+
 ## Fluidité et cache
 
 - Acquisition et décodage dans quatre workers au maximum ; la boucle UI reste disponible.
@@ -58,8 +60,8 @@ Le premier chargement dépend des fournisseurs. `scripts/check_sources.py` mesur
 Le ZIP contient `bulletin.md`, `annotations.geojson`, `manifest.json`, les images de référence importées, ainsi que les données réellement affichées :
 
 - `live/satellite.png` : image satellite sélectionnée, avec projection et emprise dans le manifeste ;
-- `live/ifs-msl.grib2` et `live/ifs-gh.grib2` : champs sources du run et de l'échéance affichés ;
-- `live/ifs-contours.json` : contours projetés en EPSG:3857, unités hPa et dam.
+- `live/ifs-*.grib2` : messages sources des paramètres IFS sélectionnés ;
+- `live/ifs-contours.json` : isolignes projetées en EPSG:3857 avec leurs identifiants de champ.
 
 Le manifeste conserve les checksums des fichiers (hors manifeste lui-même), la provenance, les échéances, l'opacité, les couches visibles et l'emprise de la vue. L'archive capture l'image satellite sélectionnée, pas toute l'animation. Si un téléchargement est en cours, l'export décrit les données encore affichées. Les annotations GeoJSON utilisent longitude/latitude WGS84. Run, validité, paramètre, niveau et unités IFS sont contrôlés dans le GRIB. Les métadonnées des références importées restent déclaratives.
 
@@ -85,3 +87,7 @@ Le test navigateur accepte `WEATHER_DESK_PLAYWRIGHT` comme chemin vers un module
 Sources : [EUMETView WMS](https://user.eumetsat.int/data-access/eumetview/resources), [ECMWF Open Data](https://www.ecmwf.int/en/forecasts/datasets/open-data), [client ECMWF](https://github.com/ecmwf/ecmwf-opendata). Attribution : EUMETSAT ; ECMWF (CC BY 4.0) ; fond © OpenStreetMap contributors.
 
 Voir [PLAN.md](PLAN.md) et [OPEN_SOURCE_REVIEW.md](OPEN_SOURCE_REVIEW.md) pour la suite et les choix de composants.
+
+La spécification produit de référence pour la refonte multi-panneaux est [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md). Elle vise d'abord l'écran relié au Mac mini et remplace les pistes exploratoires des notes précédentes lorsqu'elles divergent. MCP, l'adaptateur AROME Météo-France et l'export PNG de composition restent à implémenter; l'API AROME cible nécessite un jeton OAuth2 serveur et renvoie les champs demandés en GRIB via WCS ([documentation officielle](https://confluence-meteofrance.atlassian.net/wiki/spaces/OpenDataMeteoFrance/pages/854032416/API%2BCibl%2Be%2BMod%2Bles)).
+
+Le déploiement persistant sur le Mac mini est documenté dans [deploy/mac-mini/README.md](deploy/mac-mini/README.md) et se lance avec `scripts/deploy_mac_mini.sh`.
