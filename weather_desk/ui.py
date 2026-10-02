@@ -220,6 +220,8 @@ class WeatherDesk:
         self.map = self.maps[0]
         self.live = LiveLayers(self.maps, self.refresh, projection=self.projection)
         self.live.reference_time = self.fields["valid_time"].value
+        self.live.model_fields.param.watch(self._panel_fields_changed, "value")
+        self.live.sat_product.param.watch(self._panel_product_changed, "value")
         if self.workspace_state:
             self._restore_annotations(self.workspace_state.annotations)
         self.fields["valid_time"].param.watch(self._reference_time_changed, "value")
@@ -227,14 +229,6 @@ class WeatherDesk:
             plot.renderers.remove(renderer)
             plot.renderers.insert(1, renderer)
         self.live.projection_control.param.watch(self._projection_changed, "value")
-        if self.workspace_state:
-            first_panel = self.workspace_state.panels[0]
-            self.live.current_product = first_panel.satellite_product or self.live.current_product
-            self.live.model_fields.value = [
-                field
-                for field in first_panel.fields
-                if field in self.live.model_fields.options.values()
-            ]
         self._camera_dirty = False
         for prop in ("start", "end"):
             self.map_x_range.on_change(prop, self._camera_changed)
@@ -461,6 +455,18 @@ class WeatherDesk:
             ],
             main_max_width="1600px",
         )
+        if self.workspace_state:
+            first_panel = self.workspace_state.panels[0]
+            self.live.current_product = first_panel.satellite_product or self.live.current_product
+            self._syncing_workspace = True
+            try:
+                self.live.model_fields.value = [
+                    field
+                    for field in first_panel.fields
+                    if field in self.live.model_fields.options.values()
+                ]
+            finally:
+                self._syncing_workspace = False
         self.refresh()
 
     def _make_map(self, index: int):
@@ -788,16 +794,22 @@ class WeatherDesk:
         self._apply_layout(incoming.layout, len(incoming.panels))
         if incoming.panels:
             panel = incoming.panels[0]
-            if panel.satellite_product:
-                self.live.current_product = panel.satellite_product
-            if (
-                panel.satellite_product
-                and panel.satellite_product in self.live.sat_product.options.values()
-            ):
-                self.live.sat_product.value = panel.satellite_product
-            self.live.model_fields.value = [
-                field for field in panel.fields if field in self.live.model_fields.options.values()
-            ]
+            self._syncing_workspace = True
+            try:
+                if panel.satellite_product:
+                    self.live.current_product = panel.satellite_product
+                if (
+                    panel.satellite_product
+                    and panel.satellite_product in self.live.sat_product.options.values()
+                ):
+                    self.live.sat_product.value = panel.satellite_product
+                self.live.model_fields.value = [
+                    field
+                    for field in panel.fields
+                    if field in self.live.model_fields.options.values()
+                ]
+            finally:
+                self._syncing_workspace = False
         self._apply_camera(incoming.camera)
 
     def _editor_changed(self):
@@ -829,6 +841,27 @@ class WeatherDesk:
                 workspace_id=self.workspace_state.workspace_id,
             )
             self.workspace_state = state
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
+
+    def _panel_fields_changed(self, event):
+        if self._syncing_workspace or self.workspace_service is None:
+            return
+        self._save_panel_changes({"fields": list(event.new)})
+
+    def _panel_product_changed(self, event):
+        if self._syncing_workspace or self.workspace_service is None or not event.new:
+            return
+        self._save_panel_changes({"satellite_product": event.new})
+
+    def _save_panel_changes(self, changes):
+        try:
+            panel = self.workspace_state.panels[0]
+            self.workspace_state = self.workspace_service.apply(
+                [{"op": "configure_panel", "panel_id": panel.panel_id, "changes": changes}],
+                expected_revision=self.workspace_state.revision,
+                workspace_id=self.workspace_state.workspace_id,
+            )
         except WorkspaceConflict as exc:
             self._mark_workspace_conflict(exc)
 

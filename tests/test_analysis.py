@@ -143,6 +143,18 @@ def test_concurrent_edit_is_detected_without_overwriting_local_text(tmp_path):
     assert not first._has_local_conflict
 
 
+def test_model_field_selection_is_saved_and_restored_with_the_workspace(tmp_path):
+    database = tmp_path / "workspace.sqlite3"
+    service = WorkspaceService(SQLiteWorkspaceRepository(database))
+    desk = WeatherDesk(service)
+
+    desk.live.model_fields.value = ["gh500"]
+    reopened = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+
+    assert reopened.live.model_fields.value == ["gh500"]
+    assert reopened.workspace_state.panels[0].fields == ("gh500",)
+
+
 def test_bundle_contains_images_provenance_and_verifiable_checksums():
     desk = WeatherDesk()
     satellite = desk.sources[0]
