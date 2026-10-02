@@ -12,7 +12,7 @@ from weather_desk.cartography import (
     transformer,
     warp_rgba,
 )
-from weather_desk.data import IMAGE_SIZE
+from weather_desk.data import BBOX, IMAGE_SIZE
 from weather_desk.ui import WeatherDesk
 from weather_desk.workspace import (
     SQLiteWorkspaceRepository,
@@ -49,6 +49,23 @@ def test_land_fills_clip_large_continent_geometry_to_the_display_region():
         assert all(
             np.isfinite(x).all() and np.isfinite(y).all() for x, y in zip(xs, ys, strict=True)
         )
+        assert (
+            max(float(np.hypot(np.diff(x), np.diff(y)).max()) for x, y in zip(xs, ys, strict=True))
+            < 200_000
+        )
+        has_north_african_coast = False
+        inverse = transformer(projection, inverse=True)
+        for x, y in zip(xs, ys, strict=True):
+            mercator_x, mercator_y = inverse(x, y)
+            coordinates = [
+                to_lonlat(float(point_x), float(point_y))
+                for point_x, point_y in zip(mercator_x, mercator_y, strict=True)
+            ]
+            longitude, latitude = np.asarray(coordinates).T
+            if np.any((np.abs(latitude - 25) < 1e-6) & (longitude > -20) & (longitude < 35)):
+                has_north_african_coast = True
+                break
+        assert has_north_african_coast
 
 
 def test_satellite_raster_reprojection_keeps_pixels_and_masks_outside_domain():
@@ -62,6 +79,50 @@ def test_satellite_raster_reprojection_keeps_pixels_and_masks_outside_domain():
     assert lambert_bounds != mercator_bounds
     assert np.count_nonzero(lambert) < lambert.size
     assert np.count_nonzero(lambert) > 0
+
+
+@pytest.mark.parametrize("projection", PROJECTIONS)
+def test_rasterio_prototype_preserves_rgba_orientation_and_masks_domain(projection):
+    from weather_desk.cartography import warp_rgba_rasterio
+
+    image = np.full((IMAGE_SIZE[1], IMAGE_SIZE[0]), 0xFFFF0000, dtype=np.uint32)
+    output, bounds = warp_rgba_rasterio(image, projection)
+    assert output.shape == image.shape
+    assert np.isfinite(bounds).all()
+    valid = output != 0
+    assert valid.any()
+    assert np.all(output[valid] == 0xFFFF0000)
+    if projection == "mercator":
+        assert np.all(valid)
+    else:
+        assert np.count_nonzero(valid) < valid.size
+
+
+@pytest.mark.parametrize("projection", PROJECTIONS)
+def test_rasterio_prototype_keeps_geographic_pixel_alignment(projection):
+    from weather_desk.cartography import warp_rgba_rasterio
+
+    height, width = IMAGE_SIZE[1], IMAGE_SIZE[0]
+    rgba = np.zeros((height, width, 4), dtype=np.uint8)
+    rgba[:, :, 0] = np.arange(width, dtype=np.uint16)[None, :] % 251
+    rgba[:, :, 1] = np.arange(height, dtype=np.uint16)[:, None] % 251
+    rgba[:, :, 2] = 73
+    rgba[:, :, 3] = 255
+    image = np.ascontiguousarray(rgba).view(np.uint32).reshape(height, width)
+
+    output, (xmin, ymin, span_x, span_y) = warp_rgba_rasterio(image, projection)
+    destination_x, destination_y = project_xy(*to_mercator(0, 50), projection)
+    column = round((destination_x - xmin) / span_x * width)
+    row = round((destination_y - ymin) / span_y * height)
+    actual = output.view(np.uint8).reshape(height, width, 4)[row, column]
+    source_x, source_y = to_mercator(0, 50)
+    source_column = round((source_x - BBOX[0]) / (BBOX[2] - BBOX[0]) * width)
+    source_row = round((source_y - BBOX[1]) / (BBOX[3] - BBOX[1]) * height)
+
+    assert int(actual[0]) == pytest.approx(source_column % 251, abs=4)
+    assert int(actual[1]) == pytest.approx(source_row % 251, abs=4)
+    assert int(actual[2]) == 73
+    assert int(actual[3]) == 255
 
 
 def test_model_lines_are_reprojected_without_losing_levels():

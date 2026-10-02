@@ -23,6 +23,7 @@ dependencies = [
 [dependency-groups]
 dev = [
   "pytest>=8,<10",
+  "rasterio>=1.4.4,<2",
   "ruff>=0.12,<1",
 ]
 

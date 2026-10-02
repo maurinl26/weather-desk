@@ -11,7 +11,7 @@ from pyproj import CRS, Transformer
 from shapely.geometry import box, shape
 
 from weather_desk.analysis import EARTH_RADIUS, to_mercator
-from weather_desk.data import DOMAIN, IMAGE_SIZE
+from weather_desk.data import BBOX, DOMAIN, IMAGE_SIZE
 
 PROJECTIONS = {
     "mercator": ("Mercator", "EPSG:3857"),
@@ -147,7 +147,9 @@ def land_polygons(projection: str) -> tuple[list[list[float]], list[list[float]]
     region = box(west, south, east, north)
     xs, ys = [], []
     for feature in document["features"]:
-        clipped = shape(feature["geometry"]).intersection(region)
+        # Projection transforms straight lon/lat clip edges into curves. Add
+        # vertices before projection to avoid long artificial chords.
+        clipped = shape(feature["geometry"]).intersection(region).segmentize(0.25)
         polygons = (
             [clipped]
             if clipped.geom_type == "Polygon"
@@ -200,3 +202,33 @@ def warp_rgba(
     result = image[src_row, src_col].copy()
     result[~valid] = 0
     return result, bounds
+
+
+def warp_rgba_rasterio(
+    image: np.ndarray, projection: str
+) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    """Prototype Rasterio reprojection for comparison with the production NumPy warp."""
+    from rasterio.enums import Resampling
+    from rasterio.transform import from_bounds
+    from rasterio.warp import reproject
+
+    height, width = image.shape
+    west, south, east, north = BBOX
+    source = np.moveaxis(np.flipud(image).view(np.uint8).reshape(height, width, 4), -1, 0).copy()
+    xmin, ymin, xmax, ymax = domain_bounds(projection)
+    destination = np.zeros((4, height, width), dtype=np.uint8)
+    reproject(
+        source=source,
+        destination=destination,
+        src_transform=from_bounds(west, south, east, north, width, height),
+        src_crs=SOURCE_CRS,
+        src_alpha=4,
+        dst_transform=from_bounds(xmin, ymin, xmax, ymax, width, height),
+        dst_crs=PROJECTIONS[projection][1],
+        dst_alpha=4,
+        dst_nodata=0,
+        resampling=Resampling.bilinear,
+        num_threads=1,
+    )
+    rgba = np.ascontiguousarray(np.moveaxis(np.flip(destination, axis=1), 0, -1))
+    return rgba.view(np.uint32).reshape(height, width), (xmin, ymin, xmax - xmin, ymax - ymin)
