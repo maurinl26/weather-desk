@@ -133,6 +133,28 @@ def test_model_lines_are_reprojected_without_losing_levels():
     assert all(np.isfinite(ys[0]))
 
 
+@pytest.mark.parametrize("projection", PROJECTIONS)
+def test_annotations_keep_wgs84_coordinates_across_projection_round_trips(projection):
+    desk = WeatherDesk()
+    longitude = [-20.0, 0.0, 25.0]
+    latitude = [35.0, 50.0, 65.0]
+    mercator = [to_mercator(lon, lat) for lon, lat in zip(longitude, latitude, strict=True)]
+    source = desk.layers["cold_front"]["source"]
+    source.data = {
+        "xs": [[coordinate[0] for coordinate in mercator]],
+        "ys": [[coordinate[1] for coordinate in mercator]],
+    }
+    expected = desk.snapshot()[1]["features"][0]["geometry"]["coordinates"]
+
+    desk._set_projection(projection)
+    in_projection = desk.snapshot()[1]["features"][0]["geometry"]["coordinates"]
+    desk._set_projection("mercator")
+    round_trip = desk.snapshot()[1]["features"][0]["geometry"]["coordinates"]
+
+    assert np.asarray(in_projection) == pytest.approx(np.asarray(expected), abs=1e-8)
+    assert np.asarray(round_trip) == pytest.approx(np.asarray(expected), abs=1e-8)
+
+
 def test_projection_selection_updates_workspace_and_preserves_geojson_drawings(tmp_path):
     service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
     desk = WeatherDesk(service)
