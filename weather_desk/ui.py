@@ -170,6 +170,7 @@ class WeatherDesk:
         self.workspace_service = workspace_service
         self.workspace_state = workspace_service.read() if workspace_service else None
         self._syncing_workspace = False
+        self._has_local_conflict = False
         self.workspace_poller = None
         self.analysis_id = str(uuid4())
         self.created = utc_now()
@@ -260,6 +261,10 @@ class WeatherDesk:
         self._apply_layout(self.layout.value, initial_count)
         self.layout.param.watch(self._layout_changed, "value")
         self.status = pn.pane.Alert("", alert_type="info")
+        self.reload_conflict_button = pn.widgets.Button(
+            label="Recharger la version enregistrée", color="warning", visible=False
+        )
+        self.reload_conflict_button.on_click(self._reload_workspace_conflict)
         self.analysis_name = pn.widgets.TextInput(
             label="Nom de l'analyse",
             value=self.workspace_state.name if self.workspace_state else "Analyse météo",
@@ -269,11 +274,26 @@ class WeatherDesk:
         self.analysis_select = pn.widgets.Select(
             label="Ouvrir une analyse", options={}, value=None, disabled=True
         )
+        self.freeze_edition_button = pn.widgets.Button(
+            label="Figer une édition", color="primary", disabled=workspace_service is None
+        )
+        self.edition_select = pn.widgets.Select(
+            label="Éditions immuables", options={}, value=None, disabled=True
+        )
+        self.edition_download = pn.widgets.FileDownload(
+            label="Télécharger l'édition figée (.zip)",
+            filename="weather-desk-edition.zip",
+            callback=self._download_edition,
+            disabled=True,
+        )
         if self.workspace_service:
             self._refresh_analysis_options()
+            self._refresh_editions()
             self.analysis_select.param.watch(self._open_analysis, "value")
             self.rename_analysis_button.on_click(self._rename_analysis)
             self.duplicate_analysis_button.on_click(self._duplicate_analysis)
+            self.freeze_edition_button.on_click(self._freeze_edition)
+            self.edition_select.param.watch(self._edition_selected, "value")
         self.preview = pn.pane.Str("", styles={"white-space": "pre-wrap"})
         self.downloads = [
             pn.widgets.FileDownload(
@@ -372,6 +392,10 @@ class WeatherDesk:
                 self.analysis_name,
                 pn.Row(self.rename_analysis_button, self.duplicate_analysis_button),
                 self.analysis_select,
+                self.reload_conflict_button,
+                self.freeze_edition_button,
+                self.edition_select,
+                self.edition_download,
                 self.live.controls,
                 pn.pane.Markdown("## Contexte de l'analyse"),
                 *[self.fields[k] for k in ("zone", "valid_time", "confidence")],
@@ -585,8 +609,8 @@ class WeatherDesk:
                 workspace_id=self.workspace_state.workspace_id,
             )
             self._apply_layout(layout, len(self.workspace_state.panels))
-        except WorkspaceConflict:
-            self.sync_workspace()
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
 
     def _refresh_analysis_options(self):
         states = self.workspace_service.list()
@@ -601,13 +625,81 @@ class WeatherDesk:
         finally:
             self._syncing_workspace = False
 
+    def _refresh_editions(self):
+        records = self.workspace_service.list_editions(self.workspace_state.workspace_id)
+        options = {
+            f"{record['created_at']} · révision {record['workspace_revision']}": record[
+                "edition_id"
+            ]
+            for record in records
+        }
+        self.edition_select.options = options
+        self.edition_select.value = next(iter(options.values()), None)
+        self.edition_select.disabled = not options
+        self.edition_download.disabled = not options
+
+    def _edition_selected(self, event):
+        self.edition_download.disabled = not bool(event.new)
+
+    def _freeze_edition(self, event):
+        try:
+            manifest, annotations = self.snapshot()
+            edition_id = str(uuid4())
+            created_at = utc_now()
+            manifest["edition"] = {
+                "edition_id": edition_id,
+                "created_at_utc": created_at,
+                "workspace_id": self.workspace_state.workspace_id,
+                "workspace_revision": self.workspace_state.revision,
+                "immutable": True,
+            }
+            artifacts = {
+                f"images/{source.key}.png": source.normalized
+                for source in self.sources
+                if source.normalized
+            }
+            artifacts.update(self.live.artifacts())
+            self.workspace_service.create_edition(
+                edition_id=edition_id,
+                workspace_id=self.workspace_state.workspace_id,
+                expected_revision=self.workspace_state.revision,
+                created_at=created_at,
+                manifest=manifest,
+                annotations=annotations,
+                artifacts=artifacts,
+            )
+            self._refresh_editions()
+            self.status.object = f"Édition figée et archivée : `{edition_id}`."
+            self.status.alert_type = "success"
+        except (ValueError, WorkspaceConflict) as exc:
+            self.status.object = f"Édition non figée : {exc}"
+            self.status.alert_type = "danger"
+
+    def _download_edition(self):
+        edition_id = self.edition_select.value
+        if not edition_id:
+            raise ValueError("Sélectionner une édition archivée.")
+        edition = self.workspace_service.read_edition(edition_id)
+        images = {
+            name[len("images/") : -len(".png")]: content
+            for name, content in edition.artifacts.items()
+            if name.startswith("images/") and name.endswith(".png")
+        }
+        live = {
+            name: content for name, content in edition.artifacts.items() if name.startswith("live/")
+        }
+        return export_bundle(edition.manifest, edition.annotations, images, live)
+
     def _open_analysis(self, event):
         if self._syncing_workspace or not event.new:
             return
         self.workspace_state = self.workspace_service.read(event.new)
+        self._has_local_conflict = False
+        self.reload_conflict_button.visible = False
         self.analysis_name.value = self.workspace_state.name
         self._apply_workspace_state(self.workspace_state)
         self._refresh_analysis_options()
+        self._refresh_editions()
 
     def _rename_analysis(self, event):
         name = self.analysis_name.value.strip()
@@ -620,7 +712,9 @@ class WeatherDesk:
             self.status.object = f"Analyse « {name} » enregistrée."
             self.status.alert_type = "success"
             self._refresh_analysis_options()
-        except (WorkspaceConflict, ValueError) as exc:
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
+        except ValueError as exc:
             self.status.object = f"Nom non enregistré : {exc}"
             self.status.alert_type = "danger"
 
@@ -635,14 +729,20 @@ class WeatherDesk:
             self.status.object = f"Analyse dupliquée sous « {self.workspace_state.name} »."
             self.status.alert_type = "success"
             self._refresh_analysis_options()
+            self._refresh_editions()
         except (WorkspaceConflict, ValueError) as exc:
-            self.status.object = f"Duplication impossible : {exc}"
-            self.status.alert_type = "danger"
+            if isinstance(exc, WorkspaceConflict):
+                self._mark_workspace_conflict(exc)
+            else:
+                self.status.object = f"Duplication impossible : {exc}"
+                self.status.alert_type = "danger"
 
     def sync_workspace(self):
         if self.workspace_service is None:
             return
         incoming = self.workspace_service.read(self.workspace_state.workspace_id)
+        if self._has_local_conflict:
+            return
         if incoming.revision == self.workspace_state.revision:
             if self._camera_dirty:
                 try:
@@ -655,18 +755,16 @@ class WeatherDesk:
                         expected_revision=self.workspace_state.revision,
                         workspace_id=self.workspace_state.workspace_id,
                     )
-                except WorkspaceConflict:
-                    self.workspace_state = self.workspace_service.read(
-                        self.workspace_state.workspace_id
-                    )
-                    self._apply_workspace_state(self.workspace_state)
-                finally:
+                except WorkspaceConflict as exc:
+                    self._mark_workspace_conflict(exc)
+                else:
                     self._camera_dirty = False
             return
         self.workspace_state = incoming
         self.analysis_name.value = incoming.name
         self._apply_workspace_state(incoming)
         self._refresh_analysis_options()
+        self._refresh_editions()
 
     def _apply_workspace_state(self, incoming):
         projection_changed = incoming.projection != self.projection
@@ -732,8 +830,7 @@ class WeatherDesk:
             )
             self.workspace_state = state
         except WorkspaceConflict as exc:
-            self.status.object = f"Brouillon non sauvegardé : {exc} Rechargez la dernière révision."
-            self.status.alert_type = "danger"
+            self._mark_workspace_conflict(exc)
 
     def _annotations_geojson(self):
         convert = transformer(self.projection, inverse=True)
@@ -777,6 +874,27 @@ class WeatherDesk:
         finally:
             self._syncing_workspace = False
 
+    def _mark_workspace_conflict(self, error):
+        self._has_local_conflict = True
+        self.reload_conflict_button.visible = True
+        self.status.object = (
+            f"Conflit de sauvegarde : {error} Vos modifications locales sont conservées "
+            "jusqu'au rechargement explicite."
+        )
+        self.status.alert_type = "danger"
+
+    def _reload_workspace_conflict(self, event):
+        self.workspace_state = self.workspace_service.read(self.workspace_state.workspace_id)
+        self._has_local_conflict = False
+        self.reload_conflict_button.visible = False
+        self._apply_workspace_state(self.workspace_state)
+        self._refresh_analysis_options()
+        self._refresh_editions()
+        self.status.object = (
+            f"Version enregistrée rechargée (révision {self.workspace_state.revision})."
+        )
+        self.status.alert_type = "info"
+
     def _reference_time_changed(self, event):
         if self._syncing_workspace:
             return
@@ -794,8 +912,8 @@ class WeatherDesk:
                     workspace_id=self.workspace_state.workspace_id,
                 )
             self.live.set_reference_time(resolved.requested_time)
-        except WorkspaceConflict:
-            self.sync_workspace()
+        except WorkspaceConflict as exc:
+            self._mark_workspace_conflict(exc)
         except ValueError as exc:
             self.live.time_status.object = f"**Heure de référence invalide : {exc}**"
             self.status.object = str(exc)

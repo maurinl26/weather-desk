@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from weather_desk.workspace import (
@@ -190,6 +192,66 @@ def test_analysis_can_be_named_and_duplicated_without_sharing_future_edits(tmp_p
         == "Copie modifiée"
     )
     assert service.read(renamed.workspace_id).name == "Route Atlantique"
+
+
+def test_immutable_edition_archives_artifacts_and_checks_workspace_revision(tmp_path):
+    service = service_at(tmp_path / "workspace.sqlite3")
+    state = service.read()
+    annotations = {"type": "FeatureCollection", "features": []}
+    service.create_edition(
+        edition_id="edition-1",
+        workspace_id=state.workspace_id,
+        expected_revision=state.revision,
+        created_at="2026-10-02T20:00:00Z",
+        manifest={"analysis": {"headline": "Stable"}},
+        annotations=annotations,
+        artifacts={"live/example.bin": b"archived bytes"},
+    )
+    service.apply(
+        [{"op": "set_editorial", "value": {**state.editorial, "headline": "Changed"}}],
+        expected_revision=state.revision,
+    )
+
+    frozen = service.read_edition("edition-1")
+
+    assert frozen.manifest["analysis"]["headline"] == "Stable"
+    assert frozen.artifacts["live/example.bin"] == b"archived bytes"
+    assert service.list_editions(state.workspace_id)[0]["edition_id"] == "edition-1"
+    with pytest.raises(WorkspaceConflict, match="changé"):
+        service.create_edition(
+            edition_id="edition-stale",
+            workspace_id=state.workspace_id,
+            expected_revision=state.revision,
+            created_at="2026-10-02T20:01:00Z",
+            manifest={},
+            annotations=annotations,
+            artifacts={},
+        )
+
+
+def test_sqlite_backup_restores_editions_and_detects_corrupt_artifacts(tmp_path):
+    source = tmp_path / "active.sqlite3"
+    backup = tmp_path / "backups" / "weather-desk.sqlite3"
+    service = service_at(source)
+    state = service.read()
+    service.create_edition(
+        edition_id="edition-backup",
+        workspace_id=state.workspace_id,
+        expected_revision=state.revision,
+        created_at="2026-10-02T20:00:00Z",
+        manifest={"analysis": {"headline": "Archived"}},
+        annotations={"type": "FeatureCollection", "features": []},
+        artifacts={"live/model.grib2": b"GRIB snapshot"},
+    )
+
+    SQLiteWorkspaceRepository(source).backup_to(backup)
+    restored = service_at(backup)
+    assert restored.read_edition("edition-backup").artifacts["live/model.grib2"] == b"GRIB snapshot"
+
+    with sqlite3.connect(backup) as connection:
+        connection.execute("UPDATE edition_artifacts SET content = ?", (b"corrupted",))
+    with pytest.raises(WorkspaceError, match="corrompu"):
+        restored.read_edition("edition-backup")
 
 
 def test_workspace_starts_with_the_existing_live_layers(tmp_path):

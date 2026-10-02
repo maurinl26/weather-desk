@@ -45,9 +45,9 @@ Les zooms, les changements de couches et la rédaction conservent les annotation
 
 Le volet « Images de référence » conserve les imports PNG/JPEG/WebP et URL du prototype. Ces imports sont **non géoréférencés** ; les deux sources opérationnelles sur la carte le sont. Limites d'import : 15 Mo et 20 millions de pixels. Les URL de référence sont chargées par le navigateur ; importer le fichier pour en archiver le contenu.
 
-**Exporter avant de fermer ou recharger la session : pas encore de sauvegarde automatique ni de réimport d'analyse.** Les fichiers météo en cache ne constituent pas une sauvegarde du bulletin ou des tracés.
+Les analyses sont sauvegardées automatiquement dans SQLite. Elles peuvent être nommées, rouvertes et dupliquées. **Figer une édition** enregistre une version immuable du bulletin, des annotations, des métadonnées et des artefacts météo présents; son ZIP reste téléchargeable après modification du brouillon.
 
-Le socle multi-panneaux est en cours : disposition de 1 à 6 cartes synchronisées, stockée dans `data/workspace.sqlite3` et partagée entre sessions du navigateur. La caméra et les annotations sont communes aux cartes d'une session; leur synchronisation entre sessions et leur persistance restent à brancher. Les configurations indépendantes par panneau restent à brancher. Le catalogue EUMETSAT et les champs IFS sont sélectionnables, mais leurs contrôles sont encore communs aux panneaux.
+Le socle multi-panneaux est en cours : disposition de 1 à 6 cartes synchronisées, stockée dans `data/workspace.sqlite3` et partagée entre sessions du navigateur. Le brouillon, les annotations WGS84, la projection et la configuration du workspace sont persistés avec contrôle des révisions; un conflit garde les modifications locales jusqu'au rechargement explicite. Les configurations indépendantes par panneau restent à brancher. Le catalogue EUMETSAT et les champs IFS sont sélectionnables, mais leurs contrôles sont encore communs aux panneaux.
 
 ## Fluidité et cache
 
@@ -94,6 +94,6 @@ Sources : [EUMETView WMS](https://user.eumetsat.int/data-access/eumetview/resour
 
 Voir [PLAN.md](PLAN.md) et [OPEN_SOURCE_REVIEW.md](OPEN_SOURCE_REVIEW.md) pour la suite et les choix de composants.
 
-La spécification produit de référence pour la refonte multi-panneaux est [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md). Elle vise d'abord l'écran relié au Mac mini et remplace les pistes exploratoires des notes précédentes lorsqu'elles divergent. MCP, l'adaptateur AROME Météo-France et l'export PNG de composition restent à implémenter; l'API AROME cible nécessite un jeton OAuth2 serveur et renvoie les champs demandés en GRIB via WCS ([documentation officielle](https://confluence-meteofrance.atlassian.net/wiki/spaces/OpenDataMeteoFrance/pages/854032416/API%2BCibl%2Be%2BMod%2Bles)).
+La spécification produit de référence pour la refonte multi-panneaux est [docs/PRODUCT_SPEC.md](docs/PRODUCT_SPEC.md). Elle vise d'abord l'écran relié au Mac mini et remplace les pistes exploratoires des notes précédentes lorsqu'elles divergent. L'adaptateur AROME Météo-France reste à implémenter; l'API cible nécessite un jeton OAuth2 serveur et renvoie les champs demandés en GRIB via WCS ([documentation officielle](https://confluence-meteofrance.atlassian.net/wiki/spaces/METEOFRANCE/854032416/API%2BCibl%2Be%2BMod%2Bles)).
 
 Le déploiement OrbStack sur le Mac mini est documenté dans [deploy/mac-mini/README.md](deploy/mac-mini/README.md) et se lance avec `scripts/deploy_mac_mini.sh`. L'application s'exécute dans un conteneur Compose; Cloudflare Tunnel reste géré par `launchd` sur l'hôte.

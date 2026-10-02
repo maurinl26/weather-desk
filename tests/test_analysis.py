@@ -108,6 +108,41 @@ def test_named_analysis_can_be_duplicated_and_reopened_in_the_ui(tmp_path):
     assert desk.fields["headline"].value == "Dépression en approche."
 
 
+def test_ui_freezes_and_downloads_an_immutable_edition(tmp_path):
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    desk = WeatherDesk(service)
+    desk.fields["headline"].value = "Bulletin initial."
+
+    desk._freeze_edition(None)
+    edition_id = desk.edition_select.value
+    desk.fields["headline"].value = "Brouillon modifié après livraison."
+
+    with ZipFile(desk._download_edition()) as archive:
+        frozen_manifest = json.loads(archive.read("manifest.json"))
+        bulletin = archive.read("bulletin.md").decode()
+    assert frozen_manifest["analysis"]["headline"] == "Bulletin initial."
+    assert "Bulletin initial." in bulletin
+    assert "Brouillon modifié" not in bulletin
+    assert service.read_edition(edition_id).manifest["edition"]["immutable"] is True
+
+
+def test_concurrent_edit_is_detected_without_overwriting_local_text(tmp_path):
+    database = tmp_path / "workspace.sqlite3"
+    first = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+    second = WeatherDesk(WorkspaceService(SQLiteWorkspaceRepository(database)))
+    second.fields["headline"].value = "Texte de la seconde session."
+
+    first.fields["headline"].value = "Texte local à conserver."
+    first.sync_workspace()
+
+    assert first.fields["headline"].value == "Texte local à conserver."
+    assert first._has_local_conflict
+    assert first.reload_conflict_button.visible
+    first._reload_workspace_conflict(None)
+    assert first.fields["headline"].value == "Texte de la seconde session."
+    assert not first._has_local_conflict
+
+
 def test_bundle_contains_images_provenance_and_verifiable_checksums():
     desk = WeatherDesk()
     satellite = desk.sources[0]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -27,6 +28,17 @@ class WorkspaceError(ValueError):
 
 class WorkspaceConflict(RuntimeError):
     """The workspace changed since the caller last read it."""
+
+
+@dataclass(frozen=True)
+class Edition:
+    edition_id: str
+    workspace_id: str
+    revision: int
+    created_at: str
+    manifest: dict[str, Any]
+    annotations: dict[str, Any]
+    artifacts: dict[str, bytes]
 
 
 @dataclass(frozen=True)
@@ -206,12 +218,44 @@ class SQLiteWorkspaceRepository:
                     updated_at TEXT NOT NULL
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS edition_artifacts (
+                    sha256 TEXT PRIMARY KEY,
+                    content BLOB NOT NULL,
+                    size INTEGER NOT NULL
+                )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS editions (
+                    edition_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    workspace_revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    annotations_json TEXT NOT NULL,
+                    artifacts_json TEXT NOT NULL,
+                    FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                )"""
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=10000")
         return connection
+
+    def backup_to(self, destination: Path) -> Path:
+        """Create a consistent SQLite backup, including immutable editions and blobs."""
+        destination = Path(destination)
+        if destination.resolve() == self.path.resolve():
+            raise WorkspaceError("La sauvegarde doit utiliser un autre fichier que la base active.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with (
+            closing(self._connect()) as source,
+            closing(sqlite3.connect(destination, timeout=10)) as target,
+        ):
+            source.backup(target)
+        return destination
 
     def load(self, workspace_id: str = "main") -> WorkspaceState:
         with closing(self._connect()) as connection:
@@ -257,6 +301,99 @@ class SQLiteWorkspaceRepository:
             except sqlite3.IntegrityError as exc:
                 raise WorkspaceConflict("Une analyse porte déjà cet identifiant.") from exc
         return state
+
+    def create_edition(
+        self,
+        *,
+        edition_id: str,
+        workspace_id: str,
+        expected_revision: int,
+        created_at: str,
+        manifest: dict[str, Any],
+        annotations: dict[str, Any],
+        artifacts: dict[str, bytes],
+    ) -> Edition:
+        if not isinstance(annotations, dict) or annotations.get("type") != "FeatureCollection":
+            raise WorkspaceError("Un snapshot doit inclure les annotations GeoJSON.")
+        hashes = {}
+        for name, content in artifacts.items():
+            if not isinstance(name, str) or not isinstance(content, bytes):
+                raise WorkspaceError("Artefact de snapshot invalide.")
+            hashes[name] = hashlib.sha256(content).hexdigest()
+        encoded_manifest = _json(manifest)
+        encoded_annotations = _json(annotations)
+        encoded_hashes = _json(hashes)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT revision FROM workspaces WHERE workspace_id = ?", (workspace_id,)
+            ).fetchone()
+            if row is None or row["revision"] != expected_revision:
+                connection.execute("ROLLBACK")
+                raise WorkspaceConflict("Le brouillon a changé avant la création du snapshot.")
+            for name, content in artifacts.items():
+                digest = hashes[name]
+                connection.execute(
+                    "INSERT OR IGNORE INTO edition_artifacts VALUES (?, ?, ?)",
+                    (digest, content, len(content)),
+                )
+            connection.execute(
+                "INSERT INTO editions VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    edition_id,
+                    workspace_id,
+                    expected_revision,
+                    created_at,
+                    encoded_manifest,
+                    encoded_annotations,
+                    encoded_hashes,
+                ),
+            )
+            connection.execute("COMMIT")
+        return Edition(
+            edition_id,
+            workspace_id,
+            expected_revision,
+            created_at,
+            manifest,
+            annotations,
+            artifacts,
+        )
+
+    def list_editions(self, workspace_id: str) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT edition_id, workspace_id, workspace_revision, created_at "
+                "FROM editions WHERE workspace_id = ? ORDER BY created_at DESC",
+                (workspace_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_edition(self, edition_id: str) -> Edition:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM editions WHERE edition_id = ?", (edition_id,)
+            ).fetchone()
+            if row is None:
+                raise WorkspaceError("Snapshot d'édition introuvable.")
+            hashes = json.loads(row["artifacts_json"])
+            artifacts = {}
+            for name, digest in hashes.items():
+                artifact = connection.execute(
+                    "SELECT content FROM edition_artifacts WHERE sha256 = ?", (digest,)
+                ).fetchone()
+                if artifact is None or hashlib.sha256(artifact["content"]).hexdigest() != digest:
+                    raise WorkspaceError(f"Artefact archivé manquant ou corrompu : {name}.")
+                artifacts[name] = bytes(artifact["content"])
+        return Edition(
+            row["edition_id"],
+            row["workspace_id"],
+            row["workspace_revision"],
+            row["created_at"],
+            json.loads(row["manifest_json"]),
+            json.loads(row["annotations_json"]),
+            artifacts,
+        )
 
     def save(self, state: WorkspaceState, expected_revision: int) -> WorkspaceState:
         state.validate()
@@ -316,6 +453,15 @@ class WorkspaceService:
             revision=0,
         )
         return self.repository.create(duplicate)
+
+    def create_edition(self, **values: Any) -> Edition:
+        return self.repository.create_edition(**values)
+
+    def list_editions(self, workspace_id: str) -> list[dict[str, Any]]:
+        return self.repository.list_editions(workspace_id)
+
+    def read_edition(self, edition_id: str) -> Edition:
+        return self.repository.load_edition(edition_id)
 
     def preview(
         self,
