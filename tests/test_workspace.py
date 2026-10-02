@@ -106,6 +106,21 @@ def test_stale_writer_gets_revision_conflict(tmp_path):
     assert first_client.read().layout == "4"
 
 
+def test_preview_validates_without_persisting_and_requires_current_revision(tmp_path):
+    service = service_at(tmp_path / "workspace.sqlite3")
+    initial = service.read()
+    commands = [{"op": "set_layout", "layout": "4"}]
+
+    proposal = service.preview(commands, expected_revision=initial.revision)
+
+    assert proposal.layout == "4"
+    assert len(proposal.panels) == 4
+    assert service.read().to_dict() == initial.to_dict()
+    service.apply(commands, expected_revision=initial.revision)
+    with pytest.raises(WorkspaceConflict):
+        service.preview(commands, expected_revision=initial.revision)
+
+
 @pytest.mark.parametrize(
     "camera",
     [

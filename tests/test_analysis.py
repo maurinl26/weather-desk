@@ -149,3 +149,31 @@ def test_shared_workspace_layout_updates_another_browser_session(tmp_path):
     assert remote.workspace_state.revision == screen.workspace_state.revision
     assert len(remote.map_grid.objects) == 6
     assert remote.map_grid.ncols == 3
+
+
+def test_workspace_commands_update_shared_camera_fields_and_valid_time(tmp_path):
+    from weather_desk.workspace import Camera
+
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    screen = WeatherDesk(service)
+    remote = WeatherDesk(service)
+    state = service.read()
+    service.apply(
+        [
+            {"op": "set_reference_time", "value": "2026-10-02T12:00:00Z"},
+            {"op": "set_camera", "camera": {"longitude": -8, "latitude": 48, "zoom": 5.5}},
+            {
+                "op": "configure_panel",
+                "panel_id": state.panels[0].panel_id,
+                "changes": {"fields": ["wind10m"]},
+            },
+        ],
+        expected_revision=state.revision,
+    )
+
+    remote.sync_workspace()
+
+    assert remote.fields["valid_time"].value == "2026-10-02T12:00:00Z"
+    assert remote.live.model_fields.value == ["wind10m"]
+    assert remote.workspace_state.camera == Camera(-8, 48, 5.5)
+    assert remote.map.x_range.start > screen.map.x_range.start

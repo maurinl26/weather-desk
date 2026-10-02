@@ -12,7 +12,10 @@ dependencies = [
   "numpy>=2,<3",
   "panel>=1.9,<2",
   "Pillow>=12,<13",
+  "mcp>=1.26,<2",
+  "playwright>=1.55,<2",
   "requests>=2.32,<3",
+  "uvicorn>=0.35,<1",
 ]
 
 [dependency-groups]

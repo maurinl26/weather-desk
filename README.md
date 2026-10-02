@@ -35,6 +35,10 @@ Utiliser les boutons d'actualisation pour récupérer de nouvelles données. Les
 4. Rédiger situation, analyse, impacts et incertitudes.
 5. Exporter le ZIP complet ou le Markdown, GeoJSON et manifeste séparément.
 
+L'export PNG capture le panneau principal ou la composition visible au format carré (1080 × 1080) ou portrait (1080 × 1350). Il utilise Bokeh avec Chromium/Playwright pour inclure les tuiles et le rendu du navigateur; titre, échéance et crédits sont intégrés à l'image. Aucun envoi vers Instagram n'est effectué.
+
+Le serveur MCP Streamable HTTP fournit la lecture du workspace et du catalogue, une prévisualisation sans écriture, puis une commande distincte d'application avec contrôle de révision. Le déploiement le publie sous `/mcp` via Cloudflare Tunnel et exige un bearer token ainsi qu'une politique Cloudflare Access. Le pilotage par prompt passe par un endpoint OpenAI-compatible configuré côté serveur.
+
 Les zooms, les changements de couches et la rédaction conservent les annotations. Les fronts sont actuellement des lignes colorées, sans symboles météorologiques conventionnels. L'échéance globale s'applique à tous les tracés.
 
 Le volet « Images de référence » conserve les imports PNG/JPEG/WebP et URL du prototype. Ces imports sont **non géoréférencés** ; les deux sources opérationnelles sur la carte le sont. Limites d'import : 15 Mo et 20 millions de pixels. Les URL de référence sont chargées par le navigateur ; importer le fichier pour en archiver le contenu.
