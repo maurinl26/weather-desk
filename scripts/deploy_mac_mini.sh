@@ -8,6 +8,7 @@ APP_DIR='weather-desk'
 ssh "$REMOTE" "mkdir -p ~/$APP_DIR"
 rsync -az --delete --exclude='.git/' --exclude='.venv/' --exclude='__pycache__/' \
   --exclude='.pytest_cache/' --exclude='.ruff_cache/' \
+  --exclude='scripts/run_mac_mini.sh' \
   --exclude='data/cache/' --exclude='artifacts/' \
   "$ROOT/" "$REMOTE:~/$APP_DIR/"
 
@@ -85,10 +86,31 @@ sed "s#REPLACE_ME#$USER#g" "$APP/deploy/mac-mini/pro.galerne.weather-desk-tunnel
   > "$LAUNCH/pro.galerne.weather-desk-tunnel.plist"
 chmod 644 "$LAUNCH/pro.galerne.weather-desk-tunnel.plist"
 
-docker compose --env-file "$CONFIG/compose.env" \
-  --env-file "$CONFIG/llm.env" \
-  -f "$APP/deploy/mac-mini/compose.yml" up -d --build
+COMPOSE="docker compose --env-file $CONFIG/compose.env --env-file $CONFIG/llm.env -f $APP/deploy/mac-mini/compose.yml"
+$COMPOSE build
+
+# The previous Mac mini release ran as a native LaunchAgent on port 5006.
+# Keep its launcher for rollback, but disable it before Compose claims the port.
 GUI_UID="$(id -u)"
+LEGACY_PLIST="$LAUNCH/pro.galerne.weather-desk.plist"
+LEGACY_DISABLED="$LEGACY_PLIST.disabled"
+LEGACY_WAS_RUNNING=0
+if [ -f "$LEGACY_PLIST" ]; then
+  if launchctl print "gui/$GUI_UID/pro.galerne.weather-desk" >/dev/null 2>&1; then
+    launchctl bootout "gui/$GUI_UID" "$LEGACY_PLIST"
+    LEGACY_WAS_RUNNING=1
+  fi
+  mv "$LEGACY_PLIST" "$LEGACY_DISABLED"
+fi
+if $COMPOSE up -d; then
+  :
+else
+  if [ "$LEGACY_WAS_RUNNING" -eq 1 ]; then
+    mv "$LEGACY_DISABLED" "$LEGACY_PLIST"
+    launchctl bootstrap "gui/$GUI_UID" "$LEGACY_PLIST" || true
+  fi
+  exit 1
+fi
 LABEL=pro.galerne.weather-desk-tunnel
 if launchctl print "gui/$GUI_UID/$LABEL" >/dev/null 2>&1; then
   launchctl kickstart -k "gui/$GUI_UID/$LABEL"
@@ -98,6 +120,5 @@ fi
 
 printf 'Weather Desk container deployed on OrbStack. Tunnel: %s\n' "$TUNNEL_ID"
 printf 'Access credentials are stored in %s/access.txt (mode 600).\n' "$CONFIG"
-printf 'Cloudflare DNS CNAME needed: %s -> %s.cfargotunnel.com (proxied)\n' "$HOSTNAME" "$TUNNEL_ID"
-cat "$CONFIG/access.txt"
+printf 'Cloudflare tunnel %s serves %s\n' "$TUNNEL_ID" "$HOSTNAME"
 REMOTE_SCRIPT
