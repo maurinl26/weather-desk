@@ -77,6 +77,7 @@ class PanelConfig:
 @dataclass(frozen=True)
 class WorkspaceState:
     workspace_id: str = "main"
+    name: str = "Analyse météo"
     revision: int = 0
     layout: str = "1"
     reference_time: str = ""
@@ -113,6 +114,8 @@ class WorkspaceState:
             )
         if not isinstance(self.workspace_id, str) or not _SLUG.fullmatch(self.workspace_id):
             raise WorkspaceError("Identifiant de workspace invalide.")
+        if not isinstance(self.name, str) or not self.name.strip() or len(self.name) > 160:
+            raise WorkspaceError("Le nom de l'analyse doit contenir de 1 à 160 caractères.")
         if (
             not isinstance(self.revision, int)
             or isinstance(self.revision, bool)
@@ -170,6 +173,7 @@ class WorkspaceState:
             if version == 1:
                 data["schema_version"] = SCHEMA_VERSION
                 data["editorial"] = WorkspaceState.default().editorial
+                data["name"] = "Analyse météo"
             elif version != SCHEMA_VERSION:
                 raise WorkspaceError(f"Migration requise pour la version {version}.")
             data["camera"] = Camera(**data.get("camera", {}))
@@ -229,6 +233,31 @@ class SQLiteWorkspaceRepository:
                 raise WorkspaceError("Révision SQLite et document de workspace incohérents.")
             return state
 
+    def list(self) -> list[WorkspaceState]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT state_json, revision FROM workspaces ORDER BY updated_at DESC"
+            ).fetchall()
+        states = [WorkspaceState.from_dict(json.loads(row["state_json"])) for row in rows]
+        for state, row in zip(states, rows, strict=True):
+            if state.revision != row["revision"]:
+                raise WorkspaceError("Révision SQLite et document de workspace incohérents.")
+        return states
+
+    def create(self, state: WorkspaceState) -> WorkspaceState:
+        state.validate()
+        if state.revision != 0:
+            raise WorkspaceError("Une nouvelle analyse doit commencer à la révision zéro.")
+        with closing(self._connect()) as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO workspaces VALUES (?, ?, ?, ?)",
+                    (state.workspace_id, state.revision, _json(state.to_dict()), _now()),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise WorkspaceConflict("Une analyse porte déjà cet identifiant.") from exc
+        return state
+
     def save(self, state: WorkspaceState, expected_revision: int) -> WorkspaceState:
         state.validate()
         if (
@@ -274,6 +303,19 @@ class WorkspaceService:
 
     def read(self, workspace_id: str = "main") -> WorkspaceState:
         return self.repository.load(workspace_id)
+
+    def list(self) -> list[WorkspaceState]:
+        return self.repository.list()
+
+    def duplicate(self, workspace_id: str, name: str) -> WorkspaceState:
+        original = self.read(workspace_id)
+        duplicate = replace(
+            original,
+            workspace_id=str(uuid4()),
+            name=name.strip(),
+            revision=0,
+        )
+        return self.repository.create(duplicate)
 
     def preview(
         self,
@@ -331,6 +373,7 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
         "set_projection": {"op", "projection"},
         "set_annotations": {"op", "value"},
         "set_editorial": {"op", "value"},
+        "rename": {"op", "name"},
     }
     if op not in command_keys or set(command) - command_keys[op]:
         raise WorkspaceError(f"Arguments de commande invalides : {op}.")
@@ -405,6 +448,8 @@ def _apply_command(state: WorkspaceState, command: dict[str, Any]) -> WorkspaceS
         result = replace(state, annotations=command.get("value"))
     elif op == "set_editorial":
         result = replace(state, editorial=command.get("value"))
+    elif op == "rename":
+        result = replace(state, name=command.get("name"))
     else:
         raise WorkspaceError(f"Commande inconnue : {op}.")
     result.validate()

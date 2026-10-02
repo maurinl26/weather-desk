@@ -90,6 +90,24 @@ def test_editorial_and_annotations_autosave_and_restore_across_sessions(tmp_path
     assert coordinates == [[-2.0, 45.0], [-1.0, 48.0]]
 
 
+def test_named_analysis_can_be_duplicated_and_reopened_in_the_ui(tmp_path):
+    service = WorkspaceService(SQLiteWorkspaceRepository(tmp_path / "workspace.sqlite3"))
+    desk = WeatherDesk(service)
+    desk.analysis_name.value = "Route des Açores"
+    desk._rename_analysis(None)
+    desk.fields["headline"].value = "Dépression en approche."
+    desk.analysis_name.value = "Route bis"
+    desk._duplicate_analysis(None)
+    duplicate_id = desk.workspace_state.workspace_id
+
+    desk._open_analysis(type("Selection", (), {"new": "main"})())
+
+    assert desk.fields["headline"].value == "Dépression en approche."
+    desk._open_analysis(type("Selection", (), {"new": duplicate_id})())
+    assert desk.analysis_name.value == "Route bis — copie"
+    assert desk.fields["headline"].value == "Dépression en approche."
+
+
 def test_bundle_contains_images_provenance_and_verifiable_checksums():
     desk = WeatherDesk()
     satellite = desk.sources[0]

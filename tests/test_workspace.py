@@ -166,6 +166,32 @@ def test_schema_one_workspace_migrates_with_empty_editorial_draft():
     assert migrated.annotations["features"] == []
 
 
+def test_analysis_can_be_named_and_duplicated_without_sharing_future_edits(tmp_path):
+    service = service_at(tmp_path / "workspace.sqlite3")
+    original = service.read()
+    renamed = service.apply(
+        [{"op": "rename", "name": "Route Atlantique"}],
+        expected_revision=original.revision,
+    )
+    duplicated = service.duplicate(renamed.workspace_id, "Route Atlantique — copie")
+
+    assert {state.workspace_id for state in service.list()} == {
+        renamed.workspace_id,
+        duplicated.workspace_id,
+    }
+    assert duplicated.workspace_id != renamed.workspace_id
+    assert duplicated.revision == 0
+    assert (
+        service.apply(
+            [{"op": "rename", "name": "Copie modifiée"}],
+            expected_revision=duplicated.revision,
+            workspace_id=duplicated.workspace_id,
+        ).name
+        == "Copie modifiée"
+    )
+    assert service.read(renamed.workspace_id).name == "Route Atlantique"
+
+
 def test_workspace_starts_with_the_existing_live_layers(tmp_path):
     state = service_at(tmp_path / "workspace.sqlite3").read()
     assert state.panels[0].satellite_product == "msg_fes:wv062"

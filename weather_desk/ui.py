@@ -260,6 +260,20 @@ class WeatherDesk:
         self._apply_layout(self.layout.value, initial_count)
         self.layout.param.watch(self._layout_changed, "value")
         self.status = pn.pane.Alert("", alert_type="info")
+        self.analysis_name = pn.widgets.TextInput(
+            label="Nom de l'analyse",
+            value=self.workspace_state.name if self.workspace_state else "Analyse météo",
+        )
+        self.rename_analysis_button = pn.widgets.Button(label="Renommer", width=110)
+        self.duplicate_analysis_button = pn.widgets.Button(label="Dupliquer", width=110)
+        self.analysis_select = pn.widgets.Select(
+            label="Ouvrir une analyse", options={}, value=None, disabled=True
+        )
+        if self.workspace_service:
+            self._refresh_analysis_options()
+            self.analysis_select.param.watch(self._open_analysis, "value")
+            self.rename_analysis_button.on_click(self._rename_analysis)
+            self.duplicate_analysis_button.on_click(self._duplicate_analysis)
         self.preview = pn.pane.Str("", styles={"white-space": "pre-wrap"})
         self.downloads = [
             pn.widgets.FileDownload(
@@ -354,6 +368,10 @@ class WeatherDesk:
             sidebar=[
                 pn.pane.Markdown("## Poste multi-panneaux"),
                 self.layout,
+                pn.pane.Markdown("## Analyses"),
+                self.analysis_name,
+                pn.Row(self.rename_analysis_button, self.duplicate_analysis_button),
+                self.analysis_select,
                 self.live.controls,
                 pn.pane.Markdown("## Contexte de l'analyse"),
                 *[self.fields[k] for k in ("zone", "valid_time", "confidence")],
@@ -363,10 +381,7 @@ class WeatherDesk:
                 self.png_format,
                 self.png_preview_button,
                 self.png_download,
-                pn.pane.Markdown(
-                    "L'analyse reste en mémoire pendant cette session. "
-                    "**Exporter avant de fermer ou recharger la page.**"
-                ),
+                pn.pane.Markdown("Les textes et annotations sont sauvegardés automatiquement."),
             ],
             main=[
                 self.live.time_status,
@@ -573,6 +588,57 @@ class WeatherDesk:
         except WorkspaceConflict:
             self.sync_workspace()
 
+    def _refresh_analysis_options(self):
+        states = self.workspace_service.list()
+        options = {
+            f"{state.name} · {state.workspace_id[:8]}": state.workspace_id for state in states
+        }
+        self._syncing_workspace = True
+        try:
+            self.analysis_select.options = options
+            self.analysis_select.value = self.workspace_state.workspace_id
+            self.analysis_select.disabled = False
+        finally:
+            self._syncing_workspace = False
+
+    def _open_analysis(self, event):
+        if self._syncing_workspace or not event.new:
+            return
+        self.workspace_state = self.workspace_service.read(event.new)
+        self.analysis_name.value = self.workspace_state.name
+        self._apply_workspace_state(self.workspace_state)
+        self._refresh_analysis_options()
+
+    def _rename_analysis(self, event):
+        name = self.analysis_name.value.strip()
+        try:
+            self.workspace_state = self.workspace_service.apply(
+                [{"op": "rename", "name": name}],
+                expected_revision=self.workspace_state.revision,
+                workspace_id=self.workspace_state.workspace_id,
+            )
+            self.status.object = f"Analyse « {name} » enregistrée."
+            self.status.alert_type = "success"
+            self._refresh_analysis_options()
+        except (WorkspaceConflict, ValueError) as exc:
+            self.status.object = f"Nom non enregistré : {exc}"
+            self.status.alert_type = "danger"
+
+    def _duplicate_analysis(self, event):
+        name = self.analysis_name.value.strip()
+        try:
+            self.workspace_state = self.workspace_service.duplicate(
+                self.workspace_state.workspace_id, f"{name} — copie"
+            )
+            self.analysis_name.value = self.workspace_state.name
+            self._apply_workspace_state(self.workspace_state)
+            self.status.object = f"Analyse dupliquée sous « {self.workspace_state.name} »."
+            self.status.alert_type = "success"
+            self._refresh_analysis_options()
+        except (WorkspaceConflict, ValueError) as exc:
+            self.status.object = f"Duplication impossible : {exc}"
+            self.status.alert_type = "danger"
+
     def sync_workspace(self):
         if self.workspace_service is None:
             return
@@ -598,13 +664,16 @@ class WeatherDesk:
                     self._camera_dirty = False
             return
         self.workspace_state = incoming
+        self.analysis_name.value = incoming.name
         self._apply_workspace_state(incoming)
+        self._refresh_analysis_options()
 
     def _apply_workspace_state(self, incoming):
         projection_changed = incoming.projection != self.projection
         time_changed = incoming.reference_time != self.live.reference_time
         self._syncing_workspace = True
         try:
+            self.analysis_name.value = incoming.name
             self.layout.value = incoming.layout
             self.fields["valid_time"].value = incoming.reference_time
             for key, value in (incoming.editorial or {}).items():
