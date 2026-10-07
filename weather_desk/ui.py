@@ -369,9 +369,11 @@ class WeatherDesk:
                 field.param.watch(lambda event: self._editor_changed(), "value")
         self.view = pn.template.FastListTemplate(
             title="Weather Desk",
-            theme=pn.theme.DarkTheme,
+            theme="dark",
             accent_base_color="#19a7b8",
             header_background="#050607",
+            favicon="/pwa/icon-192.png",
+            manifest="/pwa/manifest.webmanifest",
             collapsed_sidebar=False,
             sidebar_width=340,
             sidebar=[
@@ -410,7 +412,6 @@ class WeatherDesk:
                 pn.pane.Markdown("Les textes et annotations sont sauvegardés automatiquement."),
             ],
             main=[
-                self.live.time_status,
                 pn.Card(
                     self.map_grid,
                     self.status,
@@ -446,14 +447,6 @@ class WeatherDesk:
                     collapsed=True,
                 ),
                 pn.Card(
-                    *[self.fields[k] for k in ("headline", "analysis", "impacts", "limitations")],
-                    pn.Accordion(("Aperçu du Markdown exporté", self.preview)),
-                    title="Bulletin",
-                    collapsible=False,
-                    height=640,
-                    sizing_mode="stretch_width",
-                ),
-                pn.Card(
                     self.png_preview_status,
                     self.png_preview_image,
                     title="Aperçu PNG avant publication",
@@ -463,6 +456,64 @@ class WeatherDesk:
             ],
             main_max_width="1600px",
         )
+        # ── Journal d'état → panneau flottant en bas à droite (replié par défaut) ──
+        # Les statuts/erreurs (satellite, IFS, export suspendu) ne polluent plus le
+        # flux principal : un badge indique le nombre d'alertes, le panneau se
+        # déplie au clic.
+        self.status_panel_button = pn.widgets.Button(
+            label="État des sources", button_type="light", width=170
+        )
+        self.status_panel = pn.FloatPanel(
+            self.live.time_status,
+            name="État des sources",
+            position="right-bottom",
+            visible=False,
+            offsetx=20,
+            offsety=20,
+            margin=8,
+        )
+        self.status_panel_button.on_click(lambda event: setattr(self.status_panel, "visible", True))
+
+        # ── Bulletin → drawer latéral droit (formulaire à remplir à la demande) ──
+        # La rédaction (zone, message, analyse, impacts, limites) se déroule depuis
+        # le bord droit quand on la demande, elle ne consomme plus la colonne principale.
+        self.bulletin_button = pn.widgets.Button(
+            label="✍ Rédiger le bulletin", button_type="primary", width=190
+        )
+        self.bulletin_panel = pn.FloatPanel(
+            pn.Column(
+                *[self.fields[k] for k in ("zone", "valid_time", "confidence")],
+                self.fields["headline"],
+                self.fields["analysis"],
+                self.fields["impacts"],
+                self.fields["limitations"],
+                pn.Accordion(("Aperçu du Markdown exporté", self.preview)),
+                sizing_mode="stretch_width",
+                width=420,
+                scroll=True,
+            ),
+            name="Bulletin",
+            position="right-top",
+            visible=False,
+            offsetx=20,
+            offsety=20,
+            margin=8,
+            theme="dark",
+        )
+        self.bulletin_button.on_click(lambda event: setattr(self.bulletin_panel, "visible", True))
+        # Les deux panneaux vivent dans un Row invisible ajouté au header du template.
+        self.view.header.append(
+            pn.Row(
+                pn.Spacer(width_policy="max"),
+                self.bulletin_button,
+                self.status_panel_button,
+                self.bulletin_panel,
+                self.status_panel,
+                align="end",
+            )
+        )
+        # PWA : enregistrement du service worker (servi depuis /pwa/).
+        self.view.config.js_files = {"pwa-sw-register": "/pwa/sw-register.js"}
         if self.workspace_state:
             first_panel = self.workspace_state.panels[0]
             self.live.current_product = first_panel.satellite_product or self.live.current_product

@@ -30,11 +30,18 @@ def test_prompt_leads_a_collapsible_grouped_sidebar():
 
 def test_bulletin_editor_uses_a_map_panel_height():
     desk = WeatherDesk()
-    bulletin = next(
-        card for card in desk.view.main if isinstance(card, pn.Card) and card.title == "Bulletin"
-    )
-
-    assert bulletin.height == desk.maps[0].height == 640
+    # Le bulletin vit dans un drawer latéral droit (FloatPanel), pas dans la
+    # colonne principale : la carte garde toute la hauteur visible.
+    assert not any(isinstance(card, pn.Card) and card.title == "Bulletin" for card in desk.view.main)
+    assert desk.bulletin_panel.position == "right-top"
+    assert not desk.bulletin_panel.visible
+    # Le formulaire contient tous les champs du bulletin.
+    names = {w.label for w in desk.bulletin_panel[0] if hasattr(w, "label")}
+    assert {"Zone", "Confiance", "Message principal"} <= names
+    # La carte reste l'élément dominant : le panneau d'état est flottant,
+    # le statut n'est plus en tête de colonne principale.
+    assert not any(el is desk.live.time_status for el in desk.view.main[0])
+    assert desk.status_panel.position == "right-bottom"
 
 
 def test_ui_reference_time_persists_through_the_shared_workspace_service(monkeypatch, tmp_path):
