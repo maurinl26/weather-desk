@@ -30,4 +30,4 @@ RUN chmod 755 /usr/local/bin/weather-desk-entrypoint \
 USER weather:weather
 EXPOSE 5006
 ENTRYPOINT ["/usr/local/bin/weather-desk-entrypoint"]
-CMD ["panel", "serve", "app.py", "--address", "0.0.0.0", "--port", "5006", "--allow-websocket-origin", "weather-desk.galerne-routing.com", "--use-xheaders", "--liveness"]
+CMD ["panel", "serve", "app.py", "--address", "0.0.0.0", "--port", "5006", "--allow-websocket-origin", "weather-desk.galerne-routing.com", "--static-dirs", "pwa=weather_desk/pwa", "--use-xheaders", "--liveness"]
